@@ -1,0 +1,14 @@
+[project]
+name = "sit"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate>=1.12.0",
+    "diffusers>=0.36.0",
+    "timm>=1.0.25",
+    "torchdiffeq>=0.2.5",
+    "torchvision>=0.25.0",
+    "wandb>=0.25.0",
+]
