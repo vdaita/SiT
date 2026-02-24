@@ -37,11 +37,14 @@ def main(args: Namespace):
 
     optimizer = torch.optim.Adam(draft_model.parameters(), lr=args.lr)
 
-    for train_step in tqdm(range(args.num_train_batches // NUM_STEPS)):
+    for train_step in tqdm(range(args.num_train_steps)):
         y = torch.randint(0, NUM_CLASSES, (args.batch_size,), device=DEVICE)
         x = torch.randn(args.batch_size, 4, LATENT_SIZE, LATENT_SIZE, device=DEVICE)
         dt = 1.0 / NUM_STEPS
         y_null = torch.full((args.batch_size,), 1000, device=DEVICE)
+        optimizer.zero_grad()
+
+        total_loss = 0.0
 
         for diffusion_step in range(NUM_STEPS):
             x_model = torch.cat([x, x], dim=0)
@@ -49,7 +52,6 @@ def main(args: Namespace):
             t_model = torch.cat([t, t], dim=0)
             y_model = torch.cat([y, y_null], dim=0)
 
-            optimizer.zero_grad()
 
             # forward pass the base model
             with torch.no_grad():
@@ -63,22 +65,23 @@ def main(args: Namespace):
                 v_draft_uncond, v_draft_cond = torch.chunk(v_draft_model, 2, dim=0)
                 v_draft = v_draft_uncond + cfg_scale * (v_draft_cond - v_draft_uncond)
             
-            # compute the loss
-            loss = F.mse_loss(v_base, v_draft)
-            loss.backward()
-            optimizer.step()
-
             x = x + dt * v_base
+            loss = F.mse_loss(v_base, v_draft) / NUM_STEPS
+            total_loss += loss.item()
+            loss.backward()
 
             if train_step * NUM_STEPS + diffusion_step == args.checkpoint_every:
                 save_model(draft_model, f"{train_step}-{diffusion_step}", args.checkpoint_dir)
 
-            wandb.log({"loss": loss.item(), "step": train_step * NUM_STEPS + diffusion_step})
+        # compute the loss
+        optimizer.step()
+        wandb.log({"loss": total_loss, "step": train_step})
+
     save_model(draft_model, "final", args.checkpoint_dir)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-train-batches", type=int, default=50000)
+    parser.add_argument("--num-train-steps", type=int, default=1500)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints/distill")
