@@ -25,7 +25,7 @@ if __name__ == "__main__":
         base_model.eval()
 
         draft_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
-        draft_model.load_state_dict(find_model("checkpoints/distill/draft_model_final.pt"))
+        draft_model.load_state_dict(find_model("checkpoints/distill/wandering-mountain-8/draft_model_final.pt"))
         draft_model.eval()
 
         x_in = torch.randn((batch_size, 4, LATENT_SIZE, LATENT_SIZE), device=DEVICE)
