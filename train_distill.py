@@ -12,8 +12,6 @@ import torch.nn.functional as F
 import os
 from tqdm import tqdm
 
-torch.set_grad_enabled(False)
-
 SEED = 0
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_SIZE = 256
@@ -83,7 +81,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-train-batches", type=int, default=50000)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--checkpoint-dir", type=int, default="./checkpoints/distill")
+    parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints/distill")
     parser.add_argument("--checkpoint-every", type=int, default=2000)
     parser.add_argument("--lr", type=float, default=1e-4)
     args = parser.parse_args()
