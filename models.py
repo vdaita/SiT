@@ -227,7 +227,7 @@ class SiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y):
+    def forward(self, x, t, y, return_hidden=False):
         """
         Forward pass of SiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -240,11 +240,16 @@ class SiT(nn.Module):
         c = t + y                                # (N, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
-        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
+        x_last_block = x.clone()
+        x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         if self.learn_sigma:
             x, _ = x.chunk(2, dim=1)
-        return x
+        if return_hidden:
+            return x, x_last_block
+        else:
+            return x
+
 
     def forward_with_cfg(self, x, t, y, cfg_scale):
         """
@@ -323,6 +328,9 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #################################################################################
 #                                   SiT Configs                                  #
 #################################################################################
+
+def SiT_XL_2_short(**kwargs):
+    return SiT(depth=7, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
 
 def SiT_XL_2(**kwargs):
     return SiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
