@@ -20,6 +20,8 @@ NUM_CLASSES = 1000
 NUM_STEPS = 32
 cfg_scale = 4.0
 
+torch.manual_seed(SEED)
+
 def save_model(model: SiT, iter_num: str, folder: str):
     os.makedirs(folder, exist_ok=True)
     filename = f"draft_model_{iter_num}.pt"
@@ -48,7 +50,7 @@ def main(args: Namespace):
 
         for diffusion_step in range(NUM_STEPS):
             x_model = torch.cat([x, x], dim=0)
-            t = torch.full((args.batch_size, ), 1 / NUM_STEPS, device=DEVICE)
+            t = torch.full((args.batch_size, ), diffusion_step / NUM_STEPS, device=DEVICE)
             t_model = torch.cat([t, t], dim=0)
             y_model = torch.cat([y, y_null], dim=0)
 
@@ -65,7 +67,8 @@ def main(args: Namespace):
                 v_draft_uncond, v_draft_cond = torch.chunk(v_draft_model, 2, dim=0)
                 v_draft = v_draft_uncond + cfg_scale * (v_draft_cond - v_draft_uncond)
             
-            x = x + dt * v_base
+            with torch.no_grad():
+                x = x + dt * v_base
             loss = F.mse_loss(v_base, v_draft) / NUM_STEPS
             total_loss += loss.item()
             loss.backward()
