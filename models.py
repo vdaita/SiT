@@ -279,6 +279,22 @@ class SiT(nn.Module):
         return torch.cat([eps, rest], dim=1)
 
 
+class SiT_S_2_Projected(SiT):
+    """
+    SiT-S/2 draft model with an internal projection bridge from XL hidden width.
+    """
+    def __init__(self, teacher_hidden_size=1152, **kwargs):
+        super().__init__(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+        self.teacher_hidden_size = teacher_hidden_size
+        self.token_proj = nn.Linear(teacher_hidden_size, self.blocks[0].norm1.normalized_shape[0])
+        self.cond_proj = nn.Linear(teacher_hidden_size, self.blocks[0].norm1.normalized_shape[0])
+
+    def forward_from_teacher_hidden(self, token_hidden, cond_hidden):
+        token_hidden = self.token_proj(token_hidden)
+        cond_hidden = self.cond_proj(cond_hidden)
+        return self.forward_with_emb(token_hidden, cond_hidden)
+
+
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #
 #################################################################################
