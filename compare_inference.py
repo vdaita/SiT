@@ -1,6 +1,6 @@
+import argparse
 import torch
-from tqdm import tqdm
-from models import SiT_XL_2, SiT_S_2_Projected, SiT
+from models import SiT_XL_2, SiT_S_2_Projected
 from download import find_model
 from inference import speculative_trajectory_projected, picard_trajectory
 
@@ -19,14 +19,23 @@ batch_size = 1
 torch.manual_seed(SEED)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base-ckpt", type=str, default="models/XL.pt")
+    parser.add_argument(
+        "--draft-ckpt",
+        type=str,
+        default="checkpoints/distill/wandering-mountain-8/draft_model_final.pt",
+    )
+    args = parser.parse_args()
+
     with torch.no_grad():
         base_model = SiT_XL_2(input_size=LATENT_SIZE).to(DEVICE)
-        base_model.load_state_dict(find_model("models/XL.pt"))
+        base_model.load_state_dict(find_model(args.base_ckpt))
         base_model.eval()
 
         draft_model = SiT_S_2_Projected(input_size=LATENT_SIZE).to(DEVICE)
         draft_model.load_state_dict(
-            find_model("checkpoints/distill/wandering-mountain-8/draft_model_final.pt"),
+            find_model(args.draft_ckpt),
             strict=False,
         )
         draft_model.eval()
