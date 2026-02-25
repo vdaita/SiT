@@ -37,9 +37,10 @@ def main(args: Namespace):
     draft_model = SiT_S_2_Projected(input_size=LATENT_SIZE).to(DEVICE)
     draft_model.load_state_dict(find_model("models/S.pt"), strict=False)
     draft_model.train()
-    draft_model.requires_grad_(True)
+    draft_model.freeze_except_projection()
 
-    optimizer = torch.optim.Adam(draft_model.parameters(), lr=args.lr)
+    trainable_params = [p for p in draft_model.parameters() if p.requires_grad]
+    optimizer = torch.optim.Adam(trainable_params, lr=args.lr)
 
     for train_step in tqdm(range(args.num_train_steps)):
         optimizer.zero_grad()
