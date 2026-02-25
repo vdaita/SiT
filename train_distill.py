@@ -4,9 +4,10 @@ Distill latents from the largest model to the smallest model.
 from argparse import Namespace
 import argparse
 import wandb
-from models import SiT_XL_2, SiT_S_2_Projected, SiT
+from models import SiT_XL_2, SiT_S_2, SiT, SiT_XL_2_short
 from download import find_model
 import torch
+from torch import nn
 import torch.nn.functional as F
 import os
 from tqdm import tqdm
@@ -34,13 +35,11 @@ def main(args: Namespace):
     base_model.eval()
     base_model.requires_grad_(False)
 
-    draft_model = SiT_S_2_Projected(input_size=LATENT_SIZE).to(DEVICE)
-    draft_model.load_state_dict(find_model("models/S.pt"), strict=False)
+    draft_model = SiT_XL_2_short(input_size=LATENT_SIZE).to(DEVICE)
     draft_model.train()
-    draft_model.freeze_except_projection()
+    draft_model.requires_grad_(True)
 
-    trainable_params = [p for p in draft_model.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(trainable_params, lr=args.lr)
+    optimizer = torch.optim.Adam(draft_model.parameters(), lr=args.lr)
 
     for train_step in tqdm(range(args.num_train_steps)):
         optimizer.zero_grad()
@@ -50,6 +49,8 @@ def main(args: Namespace):
         y_null = torch.full((args.batch_size,), 1000, device=DEVICE)
         t = torch.rand(args.batch_size, device=DEVICE)
 
+        next_velocities = []
+        pred_velocities = []
         dt = 1 / NUM_STEPS
 
         with torch.no_grad():
@@ -69,7 +70,7 @@ def main(args: Namespace):
             v_new_base_cond, v_new_base_uncond = v_new_base_flat.chunk(2, dim=0)
             v_new_base = v_new_base_uncond + cfg_scale * (v_new_base_cond - v_new_base_uncond)
 
-        v_draft_flat = draft_model.forward_from_teacher_hidden(v_base_hidden, v_base_emb)
+        v_draft_flat = draft_model.forward_with_emb(v_base_hidden, v_base_emb)
         v_draft_cond, v_draft_uncond = v_draft_flat.chunk(2, dim=0)
         v_draft = v_draft_uncond + cfg_scale * (v_draft_cond - v_draft_uncond)
 

@@ -31,39 +31,6 @@ def model_call_cfg(model, x, t, y, y_null, cfg_scale: float):
     return v_uncond + cfg_scale * (v_cond - v_uncond)
 
 
-def base_call_cfg_with_hidden(base_model, x, t, y, y_null, cfg_scale: float):
-    x_in = torch.cat([x, x], dim=0)
-    t_in = torch.cat([t, t], dim=0)
-    y_in = torch.cat([y, y_null], dim=0)
-
-    first_param = next(base_model.parameters(), None)
-    if first_param is not None:
-        x_in = x_in.to(device=first_param.device, dtype=first_param.dtype)
-        t_in = t_in.to(device=first_param.device, dtype=first_param.dtype)
-        y_in = y_in.to(device=first_param.device)
-
-    v_base_flat, (hidden_tokens, hidden_cond) = base_model(x_in, t_in, y_in, return_hidden=True)
-    v_base_flat = v_base_flat.to(device=x.device, dtype=x.dtype)
-    hidden_tokens = hidden_tokens.to(device=x.device, dtype=x.dtype)
-    hidden_cond = hidden_cond.to(device=x.device, dtype=x.dtype)
-
-    v_cond, v_uncond = v_base_flat.chunk(2, dim=0)
-    v_base = v_uncond + cfg_scale * (v_cond - v_uncond)
-    return v_base, hidden_tokens, hidden_cond
-
-
-def draft_call_cfg_from_hidden(draft_model, hidden_tokens, hidden_cond, cfg_scale: float):
-    first_param = next(draft_model.parameters(), None)
-    if first_param is not None:
-        hidden_tokens = hidden_tokens.to(device=first_param.device, dtype=first_param.dtype)
-        hidden_cond = hidden_cond.to(device=first_param.device, dtype=first_param.dtype)
-
-    v_draft_flat = draft_model.forward_from_teacher_hidden(hidden_tokens, hidden_cond)
-    v_cond, v_uncond = v_draft_flat.chunk(2, dim=0)
-    v_draft = v_uncond + cfg_scale * (v_cond - v_uncond)
-    return v_draft.to(device=hidden_tokens.device, dtype=hidden_tokens.dtype)
-
-
 def speculative_trajectory(
     base_model,
     draft_model,
@@ -225,6 +192,69 @@ def picard_trajectory(
         "residual_history": residual_history,
     }
 
+def two_picard_trajectory(
+    base_model,
+    draft_model
+    x,
+    y,
+    y_null,
+    num_steps: int,
+    cfg_scale: float,
+    threshold: float,
+    show_progress: bool = False,
+    progress_desc: str = "picard",
+):
+    batch_size = x.shape[0]
+    dt = 1.0 / num_steps
+
+    t_model = torch.arange(0, num_steps, device=x.device, dtype=x.dtype) / num_steps
+    t_model = t_model.unsqueeze(-1).expand(num_steps, batch_size)
+    y_traj = y.unsqueeze(0).expand(num_steps, batch_size)
+    y_null_traj = y_null.unsqueeze(0).expand(num_steps, batch_size)
+
+    x_traj_0 = x.unsqueeze(0).expand(num_steps, *x.shape)
+    x_traj = x_traj_0.clone()
+    residual = torch.tensor(float("inf"), device=x.device)
+    
+    draft_iters = 0
+    base_iters = 0
+    
+    residual_history = []
+
+    iter_range = range(num_steps)
+    if show_progress:
+        iter_range = tqdm(iter_range, desc=progress_desc, leave=False)
+
+    for i in iter_range:
+        draft_iters = i + 1
+        v_final = model_call_cfg(draft_model, x_traj, t_model, y_traj, y_null_traj, cfg_scale)
+        x_traj_new = x_traj_0.clone()
+        x_traj_new[1:] = x_traj_new[1:] + torch.cumsum(v_final[:-1], dim=0) * dt
+
+        residual = torch.max(torch.mean(torch.abs(x_traj_new - x_traj), dim=(2, 3, 4)))
+        residual_history.append(float(residual.item()))
+        x_traj = x_traj_new
+        if residual < threshold:
+            break
+
+    for i in iter_range:
+        base_iters = i + 1
+        v_final = model_call_cfg(base_model, x_traj, t_model, y_traj, y_null_traj, cfg_scale)
+        x_traj_new = x_traj_0.clone()
+        x_traj_new[1:] = x_traj_new[1:] + torch.cumsum(v_final[:-1], dim=0) * dt
+        residual = torch.max(torch.mean(torch.abs(x_traj_new - x_traj), dim=(2, 3, 4)))
+        residual_history.append(float(residual.item()))
+        x_traj = x_traj_new
+        if residual < threshold:
+            break
+
+    return x_traj[-1], {
+        "base_iters": base_iters,
+        "draft_iters": draft_iters,
+        "residual": float(residual.item()),
+        "residual_history": residual_history,
+        "trajectory": x_traj
+    }
 
 def sequential_trajectory(
     model,
@@ -250,68 +280,3 @@ def sequential_trajectory(
         x_seq = x_seq + v_final * dt
 
     return x_seq, {"iters": num_steps, "residual": 0.0, "residual_history": []}
-
-
-def speceulative_trajectory_proj_draft(
-    base_model,
-    draft_model,
-    x,
-    y,
-    y_null,
-    num_steps: int,
-    cfg_scale: float,
-    show_progress: bool = False,
-    progress_desc: str = "one-step-hidden-draft",
-):
-    """
-    At step i:
-    - always run base model to get current hidden state h_i
-    - use draft prediction from h_{i-1} if available, else use base velocity
-    - this is a single draft-iteration (one-step lookahead) method
-    """
-    dt = 1.0 / num_steps
-    x_seq = x.clone()
-    prev_hidden_tokens = None
-    prev_hidden_cond = None
-    source_history = []
-
-    iter_range = range(num_steps)
-    if show_progress:
-        iter_range = tqdm(iter_range, desc=progress_desc, leave=False)
-
-    for i in iter_range:
-        t_val = i / num_steps
-        t_th = torch.full((x.shape[0],), t_val, device=x.device, dtype=x.dtype)
-
-        v_base, hidden_tokens, hidden_cond = base_call_cfg_with_hidden(
-            base_model,
-            x_seq,
-            t_th,
-            y,
-            y_null,
-            cfg_scale,
-        )
-        v_base = v_base.to(device=x_seq.device, dtype=x_seq.dtype)
-
-        if prev_hidden_tokens is None:
-            v_use = v_base
-            source_history.append("base")
-        else:
-            v_use = draft_call_cfg_from_hidden(
-                draft_model,
-                prev_hidden_tokens,
-                prev_hidden_cond,
-                cfg_scale,
-            ).to(device=x_seq.device, dtype=x_seq.dtype)
-            source_history.append("draft")
-
-        x_seq = x_seq + v_use * dt
-        prev_hidden_tokens = hidden_tokens
-        prev_hidden_cond = hidden_cond
-
-    return x_seq, {
-        "iters": num_steps,
-        "num_base_steps": source_history.count("base"),
-        "num_draft_steps": source_history.count("draft"),
-        "source_history": source_history,
-    }

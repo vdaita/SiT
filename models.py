@@ -162,7 +162,6 @@ class SiT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
-        self.hidden_size = hidden_size
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -278,26 +277,6 @@ class SiT(nn.Module):
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
-
-
-class SiT_S_2_Projected(SiT):
-    """
-    SiT-S/2 draft model with an internal projection bridge from XL hidden width.
-    """
-    def __init__(self, teacher_hidden_size=1152, **kwargs):
-        super().__init__(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
-        self.teacher_hidden_size = teacher_hidden_size
-        self.token_proj = nn.Linear(teacher_hidden_size, self.hidden_size)
-        self.cond_proj = nn.Linear(teacher_hidden_size, self.hidden_size)
-
-    def forward_from_teacher_hidden(self, token_hidden, cond_hidden):
-        token_hidden = self.token_proj(token_hidden)
-        cond_hidden = self.cond_proj(cond_hidden)
-        return self.forward_with_emb(token_hidden, cond_hidden)
-
-    def freeze_except_projection(self):
-        for name, param in self.named_parameters():
-            param.requires_grad = name.startswith("token_proj") or name.startswith("cond_proj")
 
 
 #################################################################################
