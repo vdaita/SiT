@@ -1,8 +1,8 @@
 import torch
 from tqdm import tqdm
-from models import SiT_XL_2, SiT_S_2, SiT
+from models import SiT_XL_2, SiT_S_2_Projected, SiT
 from download import find_model
-from inference import speculative_trajectory, picard_trajectory
+from inference import speculative_trajectory_projected, picard_trajectory
 
 SEED = 0
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -24,8 +24,11 @@ if __name__ == "__main__":
         base_model.load_state_dict(find_model("models/XL.pt"))
         base_model.eval()
 
-        draft_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
-        draft_model.load_state_dict(find_model("checkpoints/distill/wandering-mountain-8/draft_model_final.pt"))
+        draft_model = SiT_S_2_Projected(input_size=LATENT_SIZE).to(DEVICE)
+        draft_model.load_state_dict(
+            find_model("checkpoints/distill/wandering-mountain-8/draft_model_final.pt"),
+            strict=False,
+        )
         draft_model.eval()
 
         x_in = torch.randn((batch_size, 4, LATENT_SIZE, LATENT_SIZE), device=DEVICE)
@@ -35,6 +38,17 @@ if __name__ == "__main__":
         picard_images, picard_stats = picard_trajectory(base_model, x_in, y, y_null, NUM_STEPS, cfg_scale, THRESHOLD, show_progress=True)
         print("Picard iteration states: ", picard_stats)
 
-        speculative_images, speculative_stats = speculative_trajectory(base_model, draft_model, x_in, y, y_null, NUM_STEPS, NUM_DRAFT_STEPS, cfg_scale, THRESHOLD, show_progress=True)
+        speculative_images, speculative_stats = speculative_trajectory_projected(
+            base_model,
+            draft_model,
+            x_in,
+            y,
+            y_null,
+            NUM_STEPS,
+            NUM_DRAFT_STEPS,
+            cfg_scale,
+            THRESHOLD,
+            show_progress=True,
+        )
         print("Speculative iteration stats: ", speculative_stats)
         
