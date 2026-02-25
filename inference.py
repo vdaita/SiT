@@ -2,73 +2,98 @@ import torch
 from tqdm import tqdm
 
 
-def model_call_cfg(
-    model,
-    x,
-    t,
-    y,
-    y_null,
-    cfg_scale: float,
-    hidden_input=None,
-    return_hidden: bool = False,
-):
+def model_call_cfg(model, x, t, y, y_null, cfg_scale: float):
     batch_size = x.shape[-4]
     channels, height, width = x.shape[-3:]
     leading_shape = x.shape[:-4]
 
-    if hidden_input is None:
-        x_model = torch.cat([x, x], dim=-4)
-        t_model = torch.cat([t, t], dim=-1)
-        y_model = torch.cat([y, y_null], dim=-1)
+    x_model = torch.cat([x, x], dim=-4)
+    t_model = torch.cat([t, t], dim=-1)
+    y_model = torch.cat([y, y_null], dim=-1)
 
-        x_model_flat = x_model.reshape(-1, channels, height, width)
-        t_model_flat = t_model.reshape(-1)
-        y_model_flat = y_model.reshape(-1)
+    x_model_flat = x_model.reshape(-1, channels, height, width)
+    t_model_flat = t_model.reshape(-1)
+    y_model_flat = y_model.reshape(-1)
 
-        first_param = next(model.parameters(), None)
-        if first_param is not None:
-            model_device = first_param.device
-            x_model_flat = x_model_flat.to(device=model_device)
-            t_model_flat = t_model_flat.to(device=model_device)
-            y_model_flat = y_model_flat.to(device=model_device)
+    first_param = next(model.parameters(), None)
+    if first_param is not None:
+        model_device = first_param.device
+        model_dtype = first_param.dtype
+        x_model_flat = x_model_flat.to(device=model_device, dtype=model_dtype)
+        t_model_flat = t_model_flat.to(device=model_device, dtype=model_dtype)
+        y_model_flat = y_model_flat.to(device=model_device)
 
-        if return_hidden:
-            v_flat, (hidden_tokens_flat, hidden_cond_flat) = model(
-                x_model_flat,
-                t_model_flat,
-                y_model_flat,
-                return_hidden=True,
-            )
-            hidden_tokens_flat = hidden_tokens_flat.to(device=x.device)
-            hidden_cond_flat = hidden_cond_flat.to(device=x.device)
-            hidden_tokens = hidden_tokens_flat.reshape(
-                *leading_shape, 2, batch_size, hidden_tokens_flat.shape[1], hidden_tokens_flat.shape[2]
-            )
-            hidden_cond = hidden_cond_flat.reshape(*leading_shape, 2, batch_size, hidden_cond_flat.shape[-1])
-        else:
-            v_flat = model(x_model_flat, t_model_flat, y_model_flat)
-            hidden_tokens = None
-            hidden_cond = None
-    else:
-        hidden_tokens, hidden_cond = hidden_input
-        hidden_tokens_flat = hidden_tokens.reshape(-1, hidden_tokens.shape[-2], hidden_tokens.shape[-1])
-        hidden_cond_flat = hidden_cond.reshape(-1, hidden_cond.shape[-1])
-        first_param = next(model.parameters(), None)
-        if first_param is not None:
-            hidden_tokens_flat = hidden_tokens_flat.to(device=first_param.device)
-            hidden_cond_flat = hidden_cond_flat.to(device=first_param.device)
-        v_flat = model.forward_from_teacher_hidden(hidden_tokens_flat, hidden_cond_flat)
-        hidden_tokens = hidden_tokens.to(device=x.device)
-        hidden_cond = hidden_cond.to(device=x.device)
-
-    v_flat = v_flat.to(device=x.device)
+    v_flat = model(x_model_flat, t_model_flat, y_model_flat)
+    v_flat = v_flat.to(device=x.device, dtype=x.dtype)
     v = v_flat.reshape(*leading_shape, 2, batch_size, channels, height, width)
     v_cond = v.select(dim=-5, index=0)
     v_uncond = v.select(dim=-5, index=1)
+    return v_uncond + cfg_scale * (v_cond - v_uncond)
+
+
+def model_call_cfg_with_hidden(model, x, t, y, y_null, cfg_scale: float):
+    batch_size = x.shape[-4]
+    channels, height, width = x.shape[-3:]
+    leading_shape = x.shape[:-4]
+
+    x_model = torch.cat([x, x], dim=-4)
+    t_model = torch.cat([t, t], dim=-1)
+    y_model = torch.cat([y, y_null], dim=-1)
+
+    x_model_flat = x_model.reshape(-1, channels, height, width)
+    t_model_flat = t_model.reshape(-1)
+    y_model_flat = y_model.reshape(-1)
+
+    first_param = next(model.parameters(), None)
+    if first_param is not None:
+        model_device = first_param.device
+        model_dtype = first_param.dtype
+        x_model_flat = x_model_flat.to(device=model_device, dtype=model_dtype)
+        t_model_flat = t_model_flat.to(device=model_device, dtype=model_dtype)
+        y_model_flat = y_model_flat.to(device=model_device)
+
+    v_flat, (hidden_tokens_flat, hidden_cond_flat) = model(
+        x_model_flat,
+        t_model_flat,
+        y_model_flat,
+        return_hidden=True,
+    )
+    v_flat = v_flat.to(device=x.device, dtype=x.dtype)
+    hidden_tokens_flat = hidden_tokens_flat.to(device=x.device, dtype=x.dtype)
+    hidden_cond_flat = hidden_cond_flat.to(device=x.device, dtype=x.dtype)
+
+    v = v_flat.reshape(*leading_shape, 2, batch_size, channels, height, width)
+    hidden_tokens = hidden_tokens_flat.reshape(
+        *leading_shape, 2, batch_size, hidden_tokens_flat.shape[1], hidden_tokens_flat.shape[2]
+    )
+    hidden_cond = hidden_cond_flat.reshape(*leading_shape, 2, batch_size, hidden_cond_flat.shape[-1])
+
+    v_cond = v.select(dim=-5, index=0)
+    v_uncond = v.select(dim=-5, index=1)
     v_guided = v_uncond + cfg_scale * (v_cond - v_uncond)
-    if return_hidden:
-        return v_guided, hidden_tokens, hidden_cond
-    return v_guided
+    return v_guided, hidden_tokens, hidden_cond
+
+
+def model_call_cfg_from_hidden_input(model, hidden_input, cfg_scale: float):
+    hidden_tokens, hidden_cond = hidden_input
+    batch_size = hidden_tokens.shape[-3]
+    num_tokens, hidden_dim = hidden_tokens.shape[-2:]
+    leading_shape = hidden_tokens.shape[:-4]
+
+    hidden_tokens_flat = hidden_tokens.reshape(-1, num_tokens, hidden_dim)
+    hidden_cond_flat = hidden_cond.reshape(-1, hidden_cond.shape[-1])
+
+    first_param = next(model.parameters(), None)
+    if first_param is not None:
+        hidden_tokens_flat = hidden_tokens_flat.to(device=first_param.device, dtype=first_param.dtype)
+        hidden_cond_flat = hidden_cond_flat.to(device=first_param.device, dtype=first_param.dtype)
+
+    v_draft_flat = model.forward_from_teacher_hidden(hidden_tokens_flat, hidden_cond_flat)
+    channels, height, width = v_draft_flat.shape[-3:]
+    v_cond, v_uncond = v_draft_flat.chunk(2, dim=0)
+    v_draft = v_uncond + cfg_scale * (v_cond - v_uncond)
+    v_draft = v_draft.to(device=hidden_tokens.device, dtype=hidden_tokens.dtype)
+    return v_draft.reshape(*leading_shape, batch_size, channels, height, width)
 
 
 def speculative_trajectory(
@@ -317,24 +342,19 @@ def speculative_trajectory_proj_draft(
         guaranteed_prefix_len = min(i + 1, num_steps)
 
         # Base forward once per outer iteration to get hidden state.
-        _, hidden_tokens, hidden_cond = model_call_cfg(
+        _, hidden_tokens, hidden_cond = model_call_cfg_with_hidden(
             base_model,
             next_draft_traj[0],
             t_model,
             y_traj,
             y_null_traj,
             cfg_scale,
-            return_hidden=True,
         )
         # Single draft speculation from that hidden state.
-        v_draft_final = model_call_cfg(
+        v_draft_final = model_call_cfg_from_hidden_input(
             draft_model,
-            next_draft_traj[0],
-            t_model,
-            y_traj,
-            y_null_traj,
-            cfg_scale,
             hidden_input=(hidden_tokens, hidden_cond),
+            cfg_scale=cfg_scale,
         )
 
         x_draft_traj = x_traj_0.clone()
