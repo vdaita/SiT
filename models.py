@@ -246,10 +246,19 @@ class SiT(nn.Module):
         if self.learn_sigma:
             x, _ = x.chunk(2, dim=1)
         if return_hidden:
-            return x, x_last_block
+            return x, (x_last_block, c)
         else:
             return x
 
+    def forward_with_emb(self, x_emb, c_emb):
+        x, c = x_emb, c_emb
+        for block in self.blocks:
+            x = block(x, c)
+        x = self.final_layer(x, c)
+        x = self.unpatchify(x)
+        if self.learn_sigma:
+            x, _ = x.chunk(2, dim=1)
+        return x
 
     def forward_with_cfg(self, x, t, y, cfg_scale):
         """

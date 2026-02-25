@@ -36,101 +36,53 @@ def main(args: Namespace):
     base_model.requires_grad_(False)
 
     draft_model = SiT_XL_2_short(input_size=LATENT_SIZE).to(DEVICE)
-    draft_model.load_state_dict(find_model("models/XL.pt"), strict=False)
     draft_model.train()
-    draft_model.final_layer.requires_grad_(False) # make sure this remains frozen
-
-    # draft_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
-    # draft_model.load_state_dict(find_model("models/S.pt"))
-    # draft_model.train()
-
-    # move the unpatchify step from XL to S 
+    draft_model.requires_grad_(True)
 
     optimizer = torch.optim.Adam(draft_model.parameters(), lr=args.lr)
 
-    dt = 1.0 / NUM_STEPS
-
     for train_step in tqdm(range(args.num_train_steps)):
+        optimizer.zero_grad()
+
+        z = torch.randn(args.batch_size, 4, LATENT_SIZE, LATENT_SIZE, device=DEVICE)
         y = torch.randint(0, NUM_CLASSES, (args.batch_size,), device=DEVICE)
         y_null = torch.full((args.batch_size,), 1000, device=DEVICE)
+        t = torch.rand(args.batch_size, device=DEVICE)
 
-        x0 = torch.randn(
-            args.batch_size, 4, LATENT_SIZE, LATENT_SIZE, device=DEVICE
-        )
+        next_velocities = []
+        pred_velocities = []
+        dt = 1 / NUM_STEPS
 
-        t_traj = torch.arange(
-            0, NUM_STEPS, device=DEVICE, dtype=torch.float32
-        ) / NUM_STEPS
-        t_traj = t_traj.unsqueeze(-1).expand(NUM_STEPS, args.batch_size)
+        with torch.no_grad():
+            x_in = torch.cat([z, z], dim=0)
+            t_in = torch.cat([t, t], dim=0)
+            y_in = torch.cat([y, y_null], dim=0)
 
-        y_traj = y.unsqueeze(0).expand(NUM_STEPS, args.batch_size)
-        y_null_traj = y_null.unsqueeze(0).expand(NUM_STEPS, args.batch_size)
+            v_base_flat, (v_base_hidden, v_base_emb) = base_model(x_in, t_in, y_in, return_hidden=True)
+            
+            v_base_cond, v_base_uncond = v_base_flat.chunk(2, dim=0)
+            v_base = v_base_uncond + cfg_scale * (v_base_cond - v_base_uncond)
+            
+            # what is your base model computing at this step?
+            x_new_in = torch.cat([z + dt * v_base, z + dt * v_base], dim=0)
+            t_new_in = t_in + dt
+            v_new_base_flat = base_model(x_new_in, t_new_in, y_in, return_hidden=False)
+            v_new_base_cond, v_new_base_uncond = v_new_base_flat.chunk(2, dim=0)
+            v_new_base = v_new_base_uncond + cfg_scale * (v_new_base_cond - v_new_base_uncond)
 
-        x_traj = x0.unsqueeze(0).expand(NUM_STEPS, *x0.shape).clone()
-        total_loss = 0.0
-        for picard_iter in range(args.num_picard_iters):
-            with torch.no_grad():
+        v_draft_flat = draft_model.forward_with_emb(v_base_hidden, v_base_emb)
+        v_draft_cond, v_draft_uncond = v_draft_flat.chunk(2, dim=0)
+        v_draft = v_draft_uncond + cfg_scale * (v_draft_cond - v_draft_uncond)
 
-                x_model = torch.cat([x_traj, x_traj], dim=1)
-                t_model = torch.cat([t_traj, t_traj], dim=1)
-                y_model = torch.cat([y_traj, y_null_traj], dim=1)
+        loss = F.huber_loss(v_new_base, v_draft, delta=1.0) # model learns to generate the next step from the hidden state here
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(draft_model.parameters(), 1.0)
+        optimizer.step()
 
-                S, B2, C, H, W = x_model.shape
-
-                v_base_flat, v_base_hidden = base_model(
-                    x_model.reshape(S * B2, C, H, W),
-                    t_model.reshape(S * B2),
-                    y_model.reshape(S * B2),
-                    return_hidden=True
-                ).reshape(S, B2, C, H, W)
-
-                v_base_uncond = v_base_flat[:, :args.batch_size]
-                v_base_cond = v_base_flat[:, args.batch_size:]
-
-                v_base = (
-                    v_base_uncond
-                    + cfg_scale * (v_base_cond - v_base_uncond)
-                )
-            optimizer.zero_grad()
-
-            v_draft_flat, v_draft_hidden = draft_model(
-                x_model.reshape(S * B2, C, H, W),
-                t_model.reshape(S * B2),
-                y_model.reshape(S * B2),
-                return_hidden=True
-            ).reshape(S, B2, C, H, W)
-
-            loss = F.huber_loss(v_base_hidden, v_draft_hidden)
-
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
-            with torch.no_grad():
-                x_traj_new = x0.unsqueeze(0).expand(NUM_STEPS, *x0.shape).clone()
-                x_traj_new[1:] = (
-                    x_traj_new[1:]
-                    + torch.cumsum(v_base[:-1], dim=0) * dt
-                )
-                x_traj = x_traj_new
-
-
-        wandb.log(
-            {
-                "loss": total_loss / args.num_picard_iters,
-                "step": train_step,
-            }
-        )
+        wandb.log({"loss": loss.item(), "step": train_step})
 
         if train_step % args.checkpoint_every == 0:
-
-            save_model(
-                draft_model,
-                f"{train_step}",
-                args.checkpoint_dir,
-            )
-
+            save_model(draft_model, str(train_step), args.checkpoint_dir)
 
     save_model(draft_model, "final", args.checkpoint_dir)
 
