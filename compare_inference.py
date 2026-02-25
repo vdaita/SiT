@@ -48,19 +48,19 @@ if __name__ == "__main__":
         picard_images, picard_stats = picard_trajectory(base_model, x_in, y, y_null, NUM_STEPS, cfg_scale, THRESHOLD, show_progress=True)
         print("Picard iteration states: ", picard_stats)
 
-        # speculative_images, speculative_stats = speculative_trajectory_proj_draft(
-        #     base_model,
-        #     draft_model,
-        #     x_in,
-        #     y,
-        #     y_null,
-        #     NUM_STEPS,
-        #     NUM_DRAFT_STEPS,
-        #     cfg_scale,
-        #     THRESHOLD,
-        #     show_progress=True,
-        # )
-        # print("Projected speculative stats: ", speculative_stats)
+        speculative_images, speculative_stats = speculative_trajectory_proj_draft(
+            base_model,
+            draft_model,
+            x_in,
+            y,
+            y_null,
+            NUM_STEPS,
+            NUM_DRAFT_STEPS,
+            cfg_scale,
+            THRESHOLD,
+            show_progress=True,
+        )
+        print("Projected speculative stats: ", speculative_stats)
 
         hybrid_images, hybrid_stats = small_then_large_trajectory(
             draft_model,
