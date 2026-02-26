@@ -11,7 +11,7 @@ def compute_threshold_schedule(timesteps, threshold, dim):
     return torch.tensor(threshold) 
 
 def has_converged(step_residuals, threshold_schedule):
-    threshold_grid = threshold_schedule.unsqueeze(-1).expand_as(step_residuals).to(step_residuals.device)
+    threshold_grid = torch.tensor(threshold_schedule).unsqueeze(-1).expand_as(step_residuals).to(step_residuals.device)
     return (step_residuals < threshold_grid).all()
 
 def model_call_cfg(model, x, t, y, y_null, cfg_scale: float):
@@ -300,15 +300,11 @@ def straight_line_speculation(
 
     t_traj = torch.arange(0, num_steps, device=x.device, dtype=x.dtype) / num_steps
     t_model = t_traj.unsqueeze(-1).unsqueeze(0).expand(num_trajs, num_steps, batch_size)
-    threshold_schedule = compute_threshold_schedule(
-        t_traj, threshold, batch_size * channels * height * width
-    )
     y_traj = y.unsqueeze(0).unsqueeze(0).expand(num_trajs, num_steps, batch_size)
     y_null_traj = y_null.unsqueeze(0).unsqueeze(0).expand(num_trajs, num_steps, batch_size)
 
     x_traj_0 = x.unsqueeze(0).unsqueeze(0).expand(num_trajs, num_steps, batch_size, channels, height, width)
     x_traj = x_traj_0.clone()
-    step_residuals = torch.tensor(float("inf"), device=x.device)
     iters = 0
     residual_history = []
     best_indices_history = []
@@ -319,51 +315,53 @@ def straight_line_speculation(
 
     for i in iter_range:
         iters = i + 1
-        v_final = model_call_cfg(model, x_traj, t_model, y_traj, y_null_traj, cfg_scale)
-        x_traj_pred = x_traj_0.clone()
-        x_traj_pred[:, 1:] = x_traj_pred[:, 1:] + torch.cumsum(v_final[:, :-1], dim=1) * dt
-
-        # Select candidates by Picard defect: ||T(x)-x|| on each trajectory.
-        v_pred = model_call_cfg(model, x_traj_pred, t_model, y_traj, y_null_traj, cfg_scale)
-        x_traj_pred_next = x_traj_0.clone()
-        x_traj_pred_next[:, 1:] = (
-            x_traj_pred_next[:, 1:] + torch.cumsum(v_pred[:, :-1], dim=1) * dt
-        )
-        residuals = calculate_residuals(x_traj_pred_next, x_traj_pred)
-        best_indices = torch.argmin(residuals, dim=0)
-        best_indices_history.append(best_indices.detach().cpu().flatten(start_dim=-2))
-
-        steps = torch.arange(num_steps, device=x_traj_pred.device)[:, None]
-        batch = torch.arange(batch_size, device=x_traj_pred.device)[None, :]
-
-        x_traj_best = x_traj_pred[best_indices, steps, batch]
-        v_best      = v_final[best_indices, steps, batch]
-
+        v_pred = model_call_cfg(model, x_traj, t_model, y_traj, y_null_traj, cfg_scale)
         x_traj_new = x_traj_0.clone()
-        x_traj_new[0, :] = x_traj_best
-        for traj_id in range(1, num_trajs):
-            start_point = i if traj_id == 1 else (i + ((num_steps - traj_id) // traj_id))
-            start_point = max(min(start_point, num_steps - 1), 1)
-            x_traj_new[traj_id, :start_point] = x_traj_best[:start_point]
-            deltas = torch.arange(1, num_steps - start_point + 1, device=x.device, dtype=x.dtype).view(-1, 1, 1, 1, 1)
-            x_traj_new[traj_id, start_point:] = (
-                x_traj_new[traj_id, start_point - 1].unsqueeze(0)
-                + deltas
-                * v_best[start_point - 1] * dt
-            )
+        x_traj_new[:, 1:] = x_traj_new[:, 1:] + torch.cumsum(v_pred[:, :-1], dim=1) * dt
 
-        step_residuals = calculate_residuals(x_traj_new[0], x_traj[0])
-        residual_history.append(step_residuals.cpu().numpy().flatten())
-        x_traj = x_traj_new
-        if has_converged(step_residuals, threshold_schedule):
+        # figure out the Picard defect to determine the trajectory
+        residuals = calculate_residuals(x_traj, x_traj_new)
+        residual_history.append(residuals.detach().cpu())
+        print("Residuals: ", residual_history[-1])
+
+        # figure out if the trajectories are satisfactory
+        done = False
+        for traj in range(num_trajs):
+            if has_converged(residuals[traj], threshold):
+                done = True
+                break
+        if done:
             break
+
+        # trajectories are bad, select the best one
+        best_traj = torch.argmin(torch.mean(residuals, dim=1)) # averaging across the number of steps, select the trajectory with the lowest average residual
+        best_indices_history.append(best_traj.detach().cpu())
+
+        x_traj_proposals = torch.zeros_like(x_traj_0)
+        x_traj_proposals[best_traj] = x_traj_new[best_traj]
+        v_best = v_pred[best_traj]
+        for traj in range(1, num_trajs):
+            # predict a new "straight line" period as a proposal
+            line_start = i
+            line_end = line_start + ((num_steps - line_start) // traj) # exclusive, we can't include num_steps itself for example
+            
+            x_traj_proposals[traj, :(line_start + 1)] = x_traj_proposals[0, :(line_start + 1)]
+            v_line = v_best[line_start]
+            
+            line = torch.arange(line_start + 1, line_end, device=x_traj_0.device)
+            # print("x_traj_proposals[traj, line_start + 1].unsqueeze(0).shape", x_traj_proposals[traj, line_start + 1].unsqueeze(0).shape, "v_line.unsqueeze(0).shape", v_line.unsqueeze(0).shape, " line shape: ", line.shape)
+            line_proposal = x_traj_proposals[traj, line_start + 1].unsqueeze(0) + v_line.unsqueeze(0) * line.view(line_end - (line_start + 1), 1, 1, 1, 1) * dt
+            # print("x traj proposals shape: ", x_traj_proposals[traj, (line_start + 1):line_end].shape," line shape: ", line.shape, " line proposal: ", line_proposal.shape)
+            x_traj_proposals[traj, (line_start + 1):line_end] = line_proposal
+            
+            # predict the rest of this as the cumulative sum of the rest
+            x_traj_proposals[traj, line_end:] = x_traj_proposals[traj, line_end - 1] + torch.cumsum(v_best[line_end:], dim=0) * dt
+        x_traj = x_traj_proposals
 
     return x_traj[0, -1], {
         "iters": iters,
-        "residual": float(torch.max(step_residuals).detach().cpu().item()),
         "best_indices_history": best_indices_history,
         "residual_history": residual_history,
-        "thresholds": threshold_schedule.detach().cpu().numpy().flatten().tolist(),
     }
 
 def sequential_trajectory(

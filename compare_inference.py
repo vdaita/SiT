@@ -53,15 +53,15 @@ if __name__ == "__main__":
         y = torch.randint(0, NUM_CLASSES, (batch_size,), device=DEVICE)
         y_null = torch.full((batch_size,), 1000, device=DEVICE)
 
-        picard_images, picard_stats = picard_trajectory(base_model, x_in, y, y_null, NUM_STEPS, cfg_scale, THRESHOLD, show_progress=True)
-        print("Picard iteration states: ", picard_stats)
-        picard_decoded = vae.decode(picard_images / 0.18215).sample
-        save_image(picard_decoded, os.path.join(OUTPUT_DIR, "picard.png"), nrow=1, normalize=True, value_range=(-1, 1))
+        # picard_images, picard_stats = picard_trajectory(base_model, x_in, y, y_null, NUM_STEPS, cfg_scale, THRESHOLD, show_progress=True)
+        # print("Picard iteration states: ", picard_stats)
+        # picard_decoded = vae.decode(picard_images / 0.18215).sample
+        # save_image(picard_decoded, os.path.join(OUTPUT_DIR, "picard.png"), nrow=1, normalize=True, value_range=(-1, 1))
 
-        two_picard_images, two_picard_stats = two_picard_trajectory(base_model, draft_model, x_in, y, y_null, NUM_STEPS, cfg_scale, THRESHOLD, show_progress=True)
-        print("Two picard iteration states: ", two_picard_stats)
-        two_picard_decoded = vae.decode(two_picard_images / 0.18215).sample
-        save_image(two_picard_decoded, os.path.join(OUTPUT_DIR, "two_picard.png"), nrow=1, normalize=True, value_range=(-1, 1))
+        # two_picard_images, two_picard_stats = two_picard_trajectory(base_model, draft_model, x_in, y, y_null, NUM_STEPS, cfg_scale, THRESHOLD, show_progress=True)
+        # print("Two picard iteration states: ", two_picard_stats)
+        # two_picard_decoded = vae.decode(two_picard_images / 0.18215).sample
+        # save_image(two_picard_decoded, os.path.join(OUTPUT_DIR, "two_picard.png"), nrow=1, normalize=True, value_range=(-1, 1))
 
         straight_spec_images, straight_spec_stats = straight_line_speculation(
             base_model,

@@ -163,6 +163,7 @@ class SiT(nn.Module):
         self.patch_size = patch_size
         self.num_heads = num_heads
         self.hidden_size = hidden_size
+        self.depth = depth
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -239,15 +240,16 @@ class SiT(nn.Module):
         t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t + y                                # (N, D)
+        latents = []
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
-        x_last_block = x.clone()
+            latents.append(x.clone())
         x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         if self.learn_sigma:
             x, _ = x.chunk(2, dim=1)
         if return_hidden:
-            return x, (x_last_block, c)
+            return x, latents
         else:
             return x
 
@@ -395,6 +397,9 @@ def SiT_L_8(**kwargs):
 
 def SiT_B_2(**kwargs):
     return SiT(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
+
+def SiT_B_2_short(**kwargs):
+    return SiT(depth=3, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
 
 def SiT_B_4(**kwargs):
     return SiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
