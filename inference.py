@@ -214,6 +214,169 @@ def picard_trajectory(
         "thresholds": threshold_schedule.detach().cpu().numpy().flatten().tolist(),
     }
 
+
+def multi_stage_trajectory(
+    model,
+    x,
+    y,
+    y_null,
+    num_coarse_steps: int,
+    num_fine_steps: int,
+    cfg_scale: float,
+    threshold: float,
+    show_progress: bool = False
+):
+    batch_size, channels, height, width = x.shape
+    
+    t_coarse_traj = torch.arange(0, num_coarse_steps, device=x.device, dtype=x.dtype) / num_coarse_steps
+    t_coarse_model = t_coarse_traj.unsqueeze(-1).expand(num_coarse_steps, batch_size)
+
+    y_model = y.unsqueeze(0).expand(num_coarse_steps, batch_size)
+    y_null_model = y_null.unsqueeze(0).expand(num_coarse_steps, batch_size)
+
+    x_traj_0 = x.unsqueeze(0).expand(num_coarse_steps, batch_size, channels, height, width)
+    x_traj = x_traj_0.clone()
+
+    num_iters = 0
+    residual_history = []
+
+    iter_range = range(num_coarse_steps)
+    if show_progress:
+        iter_range = tqdm(iter_range, desc="Coarse steps", leave=True)
+
+    # TODO: run initial forward passes
+    for iter_id in range(num_coarse_steps):
+        num_iters = iter_id + 1
+        # with the current iteration, what should the values be?
+        x_traj_updates = x_traj.clone()
+        for fine_iter_id in range(fine_iter_id):
+            t_fine_model = (fine_iter_id / num_fine_steps) + t_coarse_model
+            v_fine = model_call_cfg(model, x_traj_updates, t_fine_model, y_model, y_null_model, cfg_scale)
+            x_traj_updates += v_fine / num_fine_steps
+        v_coarse = x_traj_updates - x_traj
+
+        x_traj_next = x_traj_0.clone()
+        x_traj_next[1:] = x_traj_0[1:] + torch.cumsum(v_coarse[:-1], dim=0)
+        
+        # calculate the residual and decide whether to stop
+        step_residuals = calculate_residuals(x_traj_next, x_traj)
+        residual_history.append(step_residuals.cpu().numpy().flatten())
+        x_traj = x_traj_next
+        if has_converged(step_residuals, threshold):
+            break
+    
+    return x_traj[-1], {
+        "iters": num_iters,
+        "residual_history": residual_history
+    }
+
+
+def parareal(
+    model,
+    x,
+    y,
+    y_null,
+    num_steps: int,
+    num_fine_steps: int,  # sub-steps per coarse interval for the fine solver
+    cfg_scale: float,
+    threshold: float,
+    show_progress: bool = False,
+):
+    """
+    Parareal algorithm for parallel-in-time ODE solving.
+    
+    Coarse solver G: one Euler step per coarse timestep (same model, fewer steps).
+    Fine solver F: num_fine_steps Euler sub-steps per coarse interval (same model).
+    
+    Update rule (standard parareal):
+        u_{n+1}^{k+1} = F(u_n^{k+1}) + G(u_{n+1}^k) - G(u_n^k)
+    """
+    batch_size, channels, height, width = x.shape
+    dt_coarse = 1.0 / num_steps
+    dt_fine = dt_coarse / num_fine_steps
+
+    t_traj = torch.arange(0, num_steps, device=x.device, dtype=x.dtype) / num_steps
+    t_model = t_traj.unsqueeze(-1).expand(num_steps, batch_size)
+
+    threshold_schedule = compute_threshold_schedule(
+        t_traj, threshold, batch_size * channels * height * width
+    )
+
+    y_traj = y.unsqueeze(0).expand(num_steps, batch_size)
+    y_null_traj = y_null.unsqueeze(0).expand(num_steps, batch_size)
+
+    x_traj_0 = x.unsqueeze(0).expand(num_steps, batch_size, channels, height, width)
+
+    # --- Helper: coarse solver G ---
+    # One Euler step with the model at the coarse timestep
+    def coarse_solve(x_in):
+        # x_in: (num_steps, batch, C, H, W) — state at each coarse node
+        v = model_call_cfg(model, x_in, t_model, y_traj, y_null_traj, cfg_scale)
+        return x_in + v * dt_coarse  # shape: (num_steps, batch, C, H, W)
+
+    # --- Helper: fine solver F ---
+    # num_fine_steps Euler sub-steps within each coarse interval
+    def fine_solve(x_in):
+        # x_in: (num_steps, batch, C, H, W) — state at each coarse node
+        x_fine = x_in.clone()
+        for j in range(num_fine_steps):
+            t_fine = t_traj + j * dt_fine  # (num_steps,)
+            t_fine_model = t_fine.unsqueeze(-1).expand(num_steps, batch_size)
+            v = model_call_cfg(model, x_fine, t_fine_model, y_traj, y_null_traj, cfg_scale)
+            x_fine = x_fine + v * dt_fine
+        return x_fine  # shape: (num_steps, batch, C, H, W)
+
+    # --- Initialise with coarse solver ---
+    # Build initial trajectory by sequential coarse propagation from x
+    x_traj = x_traj_0.clone()
+    x_traj[0] = x  # u_0 is always the initial condition
+    g_old = coarse_solve(x_traj)  # G(u_n^0) for all n
+    for n in range(1, num_steps):
+        x_traj[n] = g_old[n - 1]
+
+    num_iters = 0
+    residual_history = []
+
+    iter_range = range(num_steps)
+    if show_progress:
+        iter_range = tqdm(iter_range, desc="parareal", leave=True)
+
+    for k in iter_range:
+        num_iters = k + 1
+
+        # Fine solves are embarrassingly parallel across all coarse intervals
+        f_new = fine_solve(x_traj)           # F(u_n^k)  for all n
+        g_old = coarse_solve(x_traj)         # G(u_n^k)  for all n
+
+        # Build updated trajectory sequentially (parareal correction sweep)
+        x_traj_new = x_traj_0.clone()
+        x_traj_new[0] = x  # u_0 fixed
+        for n in range(1, num_steps):
+            # G(u_{n}^{k+1}) computed from newly updated x_traj_new[n-1]
+            t_n = t_traj[n - 1].unsqueeze(-1).expand(batch_size)
+            t_single = t_n.unsqueeze(0)  # (1, batch)
+            x_prev = x_traj_new[n - 1].unsqueeze(0)  # (1, batch, C, H, W)
+            y_single = y_traj[n - 1].unsqueeze(0)
+            y_null_single = y_null_traj[n - 1].unsqueeze(0)
+            v_g_new = model_call_cfg(model, x_prev, t_single, y_single, y_null_single, cfg_scale)
+            g_new_n = x_traj_new[n - 1] + v_g_new[0] * dt_coarse
+
+            # Parareal update: F(u_{n-1}^k) + G(u_n^k+1) - G(u_{n-1}^k)
+            x_traj_new[n] = f_new[n - 1] + g_new_n - g_old[n - 1]
+
+        step_residuals = calculate_residuals(x_traj_new, x_traj)
+        residual_history.append(step_residuals.detach().cpu().numpy().flatten())
+        x_traj = x_traj_new
+
+        if has_converged(step_residuals, threshold_schedule):
+            break
+
+    return x_traj[-1], {
+        "iters": num_iters,
+        "residual": float(torch.max(step_residuals).detach().cpu().item()),
+        "residual_history": residual_history,
+        "thresholds": threshold_schedule.detach().cpu().numpy().flatten().tolist(),
+    }
 def two_picard_trajectory(
     base_model,
     draft_model,
