@@ -12,7 +12,8 @@ import torch.nn.functional as F
 import os
 from tqdm import tqdm
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
+import copy
 
 SEED = 0
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -39,9 +40,24 @@ class DataInputs:
 
 @dataclass
 class DataResult:
-    hidden_states: List[torch.Tensor]
+    hidden_states: Optional[List[torch.Tensor]]
     output: torch.Tensor
+    z_output: torch.Tensor
+    z_input: torch.Tensor
     input: DataInputs
+
+class EMA:
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        self.shadow = {k: v.clone().detach() for k, v in model.state_dict().items()}
+
+    def update(self, model):
+        with torch.no_grad():
+            for k, v in model.state_dict().items():
+                self.shadow[k] = self.decay * self.shadow[k] + (1 - self.decay) * v
+
+    def apply(self, model):
+        model.load_state_dict(self.shadow)
 
 def generate_picard_iteration_data(model, z, y, num_steps) -> List[DataResult]:
     batch_size, in_channel, latent_size, _ = z.shape
@@ -77,27 +93,44 @@ def generate_picard_iteration_data(model, z, y, num_steps) -> List[DataResult]:
 
             # print("Residual: ", torch.mean(torch.abs(z_model_new - z_model) ** 2, dim=(-1, -2, -3)).flatten())
 
-            z_model = z_model_new
-
             history.append(
                 DataResult(
                     input=DataInputs(z=z_in_flat.clone(), t=t_in_flat.clone(), y=y_in_flat.clone()),
                     output=v_flat.clone(),
-                    hidden_states=flat_hidden_states
+                    z_input=z_model.clone(),
+                    z_output=z_model_new.clone(),
+                    hidden_states=None
                 )
             )
+
+            z_model = z_model_new
     return history
 
 def main(args: Namespace):
-    base_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
-    base_model.load_state_dict(find_model("models/S.pt"))
+    base_model = SiT_B_2(input_size=LATENT_SIZE).to(DEVICE)
+    base_model.load_state_dict(find_model("models/B.pt"))
     base_model.eval()
     base_model.requires_grad_(False)
 
-    draft_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
-    draft_model.load_state_dict(find_model("models/S.pt"))
-    draft_model.train()
-    draft_model.requires_grad_(True)
+    # draft_model = SiT_B_2_short(input_size=LATENT_SIZE).to(DEVICE)
+    # draft_model.load_state_dict(find_model("./checkpoints/distill/comic-pond-39/draft_model_final.pt"))
+    draft_model = SiT_B_2(input_size=LATENT_SIZE).to(DEVICE)
+    draft_model.load_state_dict(find_model("models/B.pt"))
+    draft_model.freeze_all_but_last_k_layers(4)
+
+    ema = EMA(draft_model, decay=0.995)
+    ema_draft_holder = copy.deepcopy(draft_model)
+
+    # base_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
+    # base_model.load_state_dict(find_model("models/S.pt"))
+    # base_model.eval()
+    # base_model.requires_grad_(False)
+
+    # draft_model = SiT_B_2_short(input_size=LATENT_SIZE).to(DEVICE)
+    # draft_model.load_state_dict(find_model("./checkpoints/distill/comic-pond-39/draft_model_final.pt"))
+    # draft_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
+    # draft_model.load_state_dict(find_model("models/S.pt"))
+    # draft_model.freeze_all_but_last_k_layers(4)
 
     optimizer = torch.optim.Adam(draft_model.parameters(), lr=args.lr)
 
@@ -110,41 +143,52 @@ def main(args: Namespace):
         
         total_loss = 0
 
-        for i, data_slice in enumerate(history):
+        for i, data_slice in enumerate(history[:-1]):
             draft_model_v, draft_model_hidden_states = draft_model(data_slice.input.z, data_slice.input.t, data_slice.input.y, return_hidden=True)
-            target_v = history[-1].output
+            
+            pred_v = draft_model_v.reshape(NUM_STEPS, args.batch_size * 2, 4, LATENT_SIZE, LATENT_SIZE)
+            pred_v_cond, pred_v_uncond = pred_v[:, :args.batch_size], pred_v[:, args.batch_size:]
+            pred_v = pred_v_uncond + cfg_scale * (pred_v_cond - pred_v_uncond)
+        
+            target_v = (history[-1].z_output - data_slice.z_input) / (len(history) - i - 1)
+
+            # print("pred v: ", pred_v.shape, " target v: ", target_v.shape, "last history output shape: ", history[-1].z_output.shape, data_slice.input.z.shape)
+
             # print("input shape: ", data_slice.input.z.shape)
             # print(i, (data_slice.input.z - history[-1].input.z).abs().mean().item(), ((data_slice.input.z - history[-1].input.z).abs() ** 2).mean(dim=(-2, -3, -4)).detach().cpu().numpy())
-            loss = F.mse_loss(draft_model_v, target_v)
+            loss = F.mse_loss(pred_v, target_v)
             wandb.log({
                 f"picard_iter_loss/{i}": loss.item(),
-                "step": train_step
-            })
+            }, step=train_step)
             total_loss += loss.item()
             loss.backward()
 
         torch.nn.utils.clip_grad_norm_(draft_model.parameters(), 1.0)
         optimizer.step()
+        ema.update(draft_model)
 
         norm = (NUM_STEPS // 2) * args.batch_size
         wandb.log({ # type: ignore
             "loss": total_loss / norm,
-            "step": train_step,
-        })
+        }, step=train_step)
 
         if train_step % args.checkpoint_every == 0:
             save_model(draft_model, str(train_step), args.checkpoint_dir)
+            ema.apply(ema_draft_holder)
+            save_model(draft_model, f"{train_step}_ema", args.checkpoint_dir)
     save_model(draft_model, "final", args.checkpoint_dir)
+    ema.apply(ema_draft_holder)
+    save_model(ema_draft_holder, f"{train_step}_ema", args.checkpoint_dir)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-train-steps", type=int, default=1500)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints/distill")
     parser.add_argument("--checkpoint-every", type=int, default=500)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--lr", type=float, default=3e-5)
     args = parser.parse_args()
 
     wandb.init(

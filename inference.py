@@ -245,18 +245,18 @@ def multi_stage_trajectory(
         iter_range = tqdm(iter_range, desc="Coarse steps", leave=True)
 
     # TODO: run initial forward passes
-    for iter_id in range(num_coarse_steps):
+    for iter_id in iter_range:
         num_iters = iter_id + 1
         # with the current iteration, what should the values be?
         x_traj_updates = x_traj.clone()
-        for fine_iter_id in range(fine_iter_id):
-            t_fine_model = (fine_iter_id / num_fine_steps) + t_coarse_model
+        for fine_iter_id in range(num_fine_steps):
+            t_fine_model = (fine_iter_id / (num_fine_steps * num_coarse_steps)) + t_coarse_model
             v_fine = model_call_cfg(model, x_traj_updates, t_fine_model, y_model, y_null_model, cfg_scale)
-            x_traj_updates += v_fine / num_fine_steps
+            x_traj_updates += v_fine * (1/(num_fine_steps * num_coarse_steps))
         v_coarse = x_traj_updates - x_traj
 
         x_traj_next = x_traj_0.clone()
-        x_traj_next[1:] = x_traj_0[1:] + torch.cumsum(v_coarse[:-1], dim=0)
+        x_traj_next[1:] = x_traj_0[0].unsqueeze(0) + torch.cumsum(v_coarse[:-1], dim=0)
         
         # calculate the residual and decide whether to stop
         step_residuals = calculate_residuals(x_traj_next, x_traj)

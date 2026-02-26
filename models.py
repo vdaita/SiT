@@ -178,6 +178,17 @@ class SiT(nn.Module):
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
 
+    def freeze_all_but_last_k_layers(self, k):
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+        
+        for block in self.blocks[-k:]:
+            for parameter in block.parameters():
+                parameter.requires_grad = True
+
+        for parameter in self.final_layer.parameters():
+            parameter.requires_grad = True
+
     def initialize_weights(self):
         # Initialize transformer layers:
         def _basic_init(module):
