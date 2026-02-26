@@ -410,6 +410,9 @@ def SiT_B_8(**kwargs):
 def SiT_S_2(**kwargs):
     return SiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
 
+def SiT_S_2_short(**kwargs):
+    return SiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+
 def SiT_S_4(**kwargs):
     return SiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
 

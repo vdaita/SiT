@@ -4,7 +4,7 @@ Distill latents from the largest model to the smallest model.
 from argparse import Namespace
 import argparse
 import wandb
-from models import SiT_XL_2, SiT_S_2, SiT, SiT_XL_2_short, SiT_B_2, SiT_B_2_short, SiT_S_2_short
+from models import SiT_XL_2, SiT_S_2, SiT, SiT_XL_2_short, SiT_B_2, SiT_B_2_short
 from download import find_model
 import torch
 from torch import nn
@@ -21,7 +21,7 @@ LATENT_SIZE = IMAGE_SIZE // 8
 NUM_CLASSES = 1000
 NUM_STEPS = 32
 cfg_scale = 4.0
-hidden_weight_lambda = 0.01
+hidden_weight_lambda = 0.1
 
 torch.manual_seed(SEED)
 
@@ -52,7 +52,7 @@ def generate_picard_iteration_data(model, z, y, num_steps) -> List[DataResult]:
     y_null_model = torch.full((num_steps, batch_size), 1000, device=z.device)
     t_model = torch.arange(0, num_steps, device=z.device).unsqueeze(-1).expand(num_steps, batch_size) / num_steps
 
-    dt = 1 / NUM_STEPS
+    dt = 1 / num_steps
 
     history = []
     with torch.no_grad():
@@ -72,8 +72,12 @@ def generate_picard_iteration_data(model, z, y, num_steps) -> List[DataResult]:
             v_cond, v_uncond = v_model[:, :batch_size], v_model[:, batch_size:]
             v = v_uncond + cfg_scale * (v_cond - v_uncond)
         
-            z_model = z_0_traj.clone()
-            z_model[1:] += torch.cumsum(v[:-1], dim=0) * dt
+            z_model_new = z_0_traj.clone()
+            z_model_new[1:] = z_model_new[1:] + torch.cumsum(v[:-1], dim=0) * dt
+
+            # print("Residual: ", torch.mean(torch.abs(z_model_new - z_model) ** 2, dim=(-1, -2, -3)).flatten())
+
+            z_model = z_model_new
 
             history.append(
                 DataResult(
@@ -90,7 +94,8 @@ def main(args: Namespace):
     base_model.eval()
     base_model.requires_grad_(False)
 
-    draft_model = SiT_S_2_short(input_size=LATENT_SIZE).to(DEVICE)
+    draft_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
+    draft_model.load_state_dict(find_model("models/S.pt"))
     draft_model.train()
     draft_model.requires_grad_(True)
 
@@ -103,34 +108,27 @@ def main(args: Namespace):
 
         optimizer.zero_grad()
         
-        total_hidden_loss = 0
-        total_vel_loss = 0
         total_loss = 0
 
-        for data_slice in history:
+        for i, data_slice in enumerate(history):
             draft_model_v, draft_model_hidden_states = draft_model(data_slice.input.z, data_slice.input.t, data_slice.input.y, return_hidden=True)
-            
-            vel_loss = F.mse_loss(draft_model_v, data_slice.output)
-            
-            hidden_loss = 0
-            for draft_h, base_h in zip(draft_model_hidden_states, data_slice.hidden_states[::4]):
-                hidden_loss += hidden_weight_lambda * F.mse_loss(draft_h, base_h)
-                assert draft_h.shape == base_h.shape
-            
-            loss = vel_loss + hidden_loss
-            total_vel_loss += vel_loss.item()
-            total_hidden_loss += hidden_loss.item() # type: ignore
+            target_v = history[-1].output
+            # print("input shape: ", data_slice.input.z.shape)
+            # print(i, (data_slice.input.z - history[-1].input.z).abs().mean().item(), ((data_slice.input.z - history[-1].input.z).abs() ** 2).mean(dim=(-2, -3, -4)).detach().cpu().numpy())
+            loss = F.mse_loss(draft_model_v, target_v)
+            wandb.log({
+                f"picard_iter_loss/{i}": loss.item(),
+                "step": train_step
+            })
             total_loss += loss.item()
             loss.backward()
 
         torch.nn.utils.clip_grad_norm_(draft_model.parameters(), 1.0)
         optimizer.step()
 
-        norm = (NUM_STEPS // 2) * args.batch_size * NUM_STEPS
+        norm = (NUM_STEPS // 2) * args.batch_size
         wandb.log({ # type: ignore
-            "loss": total_loss / norm, # get average losses over each **individual** step
-            "vel_loss": total_vel_loss / norm,
-            "hidden_loss": total_hidden_loss / norm,
+            "loss": total_loss / norm,
             "step": train_step,
         })
 
@@ -142,11 +140,11 @@ def main(args: Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-train-steps", type=int, default=1500)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints/distill")
     parser.add_argument("--checkpoint-every", type=int, default=500)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=1e-5)
     args = parser.parse_args()
 
     wandb.init(

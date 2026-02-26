@@ -243,7 +243,8 @@ def two_picard_trajectory(
     draft_iters = 0
     base_iters = 0
     
-    residual_history = []
+    draft_residual_history = []
+    base_residual_history = []
 
     draft_range = range(num_steps)
     base_range = range(num_steps)
@@ -258,7 +259,7 @@ def two_picard_trajectory(
         x_traj_new[1:] = x_traj_new[1:] + torch.cumsum(v_final[:-1], dim=0) * dt
 
         step_residuals = calculate_residuals(x_traj, x_traj_new)
-        residual_history.append(step_residuals.cpu().numpy().flatten())
+        draft_residual_history.append(step_residuals.cpu().numpy().flatten())
         x_traj = x_traj_new
         if has_converged(step_residuals, threshold_schedule):
             break
@@ -270,7 +271,7 @@ def two_picard_trajectory(
         x_traj_new[1:] = x_traj_new[1:] + torch.cumsum(v_final[:-1], dim=0) * dt
         
         step_residuals = calculate_residuals(x_traj, x_traj_new)
-        residual_history.append(step_residuals.cpu().numpy().flatten())
+        base_residual_history.append(step_residuals.cpu().numpy().flatten())
         x_traj = x_traj_new
         if has_converged(step_residuals, threshold_schedule):
             break
@@ -279,7 +280,8 @@ def two_picard_trajectory(
         "base_iters": base_iters,
         "draft_iters": draft_iters,
         "residual": float(torch.max(step_residuals).detach().cpu().item()),
-        "residual_history": residual_history,
+        "draft_residual_history": draft_residual_history,
+        "base_residual_history": base_residual_history,
         "thresholds": threshold_schedule.detach().cpu().numpy().flatten().tolist(),
     }
 
@@ -321,8 +323,8 @@ def straight_line_speculation(
 
         # figure out the Picard defect to determine the trajectory
         residuals = calculate_residuals(x_traj, x_traj_new)
-        residual_history.append(residuals.detach().cpu())
-        print("Residuals: ", residual_history[-1])
+        residual_history.append(residuals.detach().cpu().flatten(start_dim=-2))
+        # print("Residuals: ", residual_history[-1])
 
         # figure out if the trajectories are satisfactory
         done = False
@@ -338,24 +340,34 @@ def straight_line_speculation(
         best_indices_history.append(best_traj.detach().cpu())
 
         x_traj_proposals = torch.zeros_like(x_traj_0)
-        x_traj_proposals[best_traj] = x_traj_new[best_traj]
+        x_traj_proposals[0] = x_traj_new[best_traj]
         v_best = v_pred[best_traj]
         for traj in range(1, num_trajs):
             # predict a new "straight line" period as a proposal
             line_start = i
             line_end = line_start + ((num_steps - line_start) // traj) # exclusive, we can't include num_steps itself for example
-            
-            x_traj_proposals[traj, :(line_start + 1)] = x_traj_proposals[0, :(line_start + 1)]
+                        
+            x_traj_proposals[traj, :(line_start + 1)] = x_traj_new[best_traj, :(line_start + 1)]
+
             v_line = v_best[line_start]
-            
-            line = torch.arange(line_start + 1, line_end, device=x_traj_0.device)
-            # print("x_traj_proposals[traj, line_start + 1].unsqueeze(0).shape", x_traj_proposals[traj, line_start + 1].unsqueeze(0).shape, "v_line.unsqueeze(0).shape", v_line.unsqueeze(0).shape, " line shape: ", line.shape)
-            line_proposal = x_traj_proposals[traj, line_start + 1].unsqueeze(0) + v_line.unsqueeze(0) * line.view(line_end - (line_start + 1), 1, 1, 1, 1) * dt
-            # print("x traj proposals shape: ", x_traj_proposals[traj, (line_start + 1):line_end].shape," line shape: ", line.shape, " line proposal: ", line_proposal.shape)
-            x_traj_proposals[traj, (line_start + 1):line_end] = line_proposal
-            
-            # predict the rest of this as the cumulative sum of the rest
-            x_traj_proposals[traj, line_end:] = x_traj_proposals[traj, line_end - 1] + torch.cumsum(v_best[line_end:], dim=0) * dt
+
+            x0 = x_traj_proposals[traj, line_start]
+
+            line = torch.arange(1, line_end - line_start, device=x.device)
+
+            line_proposal = (
+                x0.unsqueeze(0)
+                + v_line.unsqueeze(0) * line.view(-1,1,1,1,1) * dt
+            )
+
+            x_traj_proposals[traj, line_start+1:line_end] = line_proposal
+
+
+            # tail
+            x_traj_proposals[traj, line_end:] = (
+                x_traj_proposals[traj, line_end - 1].unsqueeze(0)
+                + torch.cumsum(v_best[line_end - 1:-1], dim=0) * dt
+            )
         x_traj = x_traj_proposals
 
     return x_traj[0, -1], {
