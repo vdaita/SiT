@@ -11,8 +11,8 @@ SEED = 0
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_SIZE = 256
 LATENT_SIZE = IMAGE_SIZE // 8
-NUM_CLASSES = 10
-NUM_STEPS = 16
+NUM_CLASSES = 1000
+NUM_STEPS = 32
 cfg_scale = 4.0
 NUM_DRAFT_STEPS = 4
 
