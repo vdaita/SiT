@@ -70,11 +70,13 @@ def main(args: Namespace):
             v_new_base_cond, v_new_base_uncond = v_new_base_flat.chunk(2, dim=0)
             v_new_base = v_new_base_uncond + cfg_scale * (v_new_base_cond - v_new_base_uncond)
 
+            v_residual = v_new_base - v_base
+
         v_draft_flat = draft_model.forward_with_emb(v_base_hidden, v_base_emb)
         v_draft_cond, v_draft_uncond = v_draft_flat.chunk(2, dim=0)
         v_draft = v_draft_uncond + cfg_scale * (v_draft_cond - v_draft_uncond)
 
-        loss = F.huber_loss(v_new_base, v_draft, delta=1.0) # model learns to generate the next step from the hidden state here
+        loss = F.mse_loss(v_residual, v_draft) # model learns to produce a residual here
         loss.backward()
         torch.nn.utils.clip_grad_norm_(draft_model.parameters(), 1.0)
         optimizer.step()

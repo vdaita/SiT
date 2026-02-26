@@ -5,7 +5,7 @@ import numpy as np
 np.set_printoptions(suppress=True, precision=9, floatmode='maxprec')
 
 def calculate_residuals(x_new, x_old):
-    return torch.mean(torch.abs(x_new - x_old) ** 2, dim=(2, 3, 4))
+    return torch.mean(torch.abs(x_new - x_old) ** 2, dim=(-3, -2, -1))
 
 def compute_threshold_schedule(timesteps, threshold, dim):
     return torch.tensor(threshold) 
@@ -81,6 +81,7 @@ def speculative_trajectory(
     step_residual = torch.tensor(float("inf"), device=device)
     residual_history = []
     draft_residual_grid_history = []
+    best_draft_indices_history = []
 
     iter_range = range(num_steps)
     if show_progress:
@@ -134,8 +135,9 @@ def speculative_trajectory(
             )
 
         residual = torch.mean(torch.abs(x_base_traj - next_draft_traj), dim=(-1, -2, -3))
-        draft_residual_grid_history.append(residual.detach().cpu())
+        draft_residual_grid_history.append(residual.detach().cpu().flatten())
         best_draft_indices = torch.argmin(residual, dim=0)
+        best_draft_indices_history.append(best_draft_indices.detach().cpu().flatten())
         step_indices = torch.arange(num_steps, device=device).unsqueeze(1).expand(num_steps, batch_size)
         batch_indices = torch.arange(batch_size, device=device).unsqueeze(0).expand(num_steps, batch_size)
         best_trajectory = x_base_traj[best_draft_indices, step_indices, batch_indices]
@@ -155,6 +157,7 @@ def speculative_trajectory(
         "iters": outer_iters,
         "residual": float(step_residual.detach().cpu().item()),
         "residual_history": residual_history,
+        "best_draft_indices_history": best_draft_indices_history,
         "draft_residual_grid_history": draft_residual_grid_history,
         "thresholds": threshold_schedule.detach().cpu().numpy().flatten().tolist(),
     }
@@ -276,6 +279,89 @@ def two_picard_trajectory(
         "base_iters": base_iters,
         "draft_iters": draft_iters,
         "residual": float(torch.max(step_residuals).detach().cpu().item()),
+        "residual_history": residual_history,
+        "thresholds": threshold_schedule.detach().cpu().numpy().flatten().tolist(),
+    }
+
+def straight_line_speculation(
+    model,
+    x,
+    y,
+    y_null,
+    num_steps: int,
+    num_trajs: int,
+    cfg_scale: float,
+    threshold: float,
+    show_progress: bool = False,
+    progress_desc: str = "straight_line_picard",
+):
+    batch_size, channels, height, width = x.shape
+    dt = 1.0 / num_steps
+
+    t_traj = torch.arange(0, num_steps, device=x.device, dtype=x.dtype) / num_steps
+    t_model = t_traj.unsqueeze(-1).unsqueeze(0).expand(num_trajs, num_steps, batch_size)
+    threshold_schedule = compute_threshold_schedule(
+        t_traj, threshold, batch_size * channels * height * width
+    )
+    y_traj = y.unsqueeze(0).unsqueeze(0).expand(num_trajs, num_steps, batch_size)
+    y_null_traj = y_null.unsqueeze(0).unsqueeze(0).expand(num_trajs, num_steps, batch_size)
+
+    x_traj_0 = x.unsqueeze(0).unsqueeze(0).expand(num_trajs, num_steps, batch_size, channels, height, width)
+    x_traj = x_traj_0.clone()
+    step_residuals = torch.tensor(float("inf"), device=x.device)
+    iters = 0
+    residual_history = []
+    best_indices_history = []
+
+    iter_range = range(num_steps)
+    if show_progress:
+        iter_range = tqdm(iter_range, desc=progress_desc, leave=True)
+
+    for i in iter_range:
+        iters = i + 1
+        v_final = model_call_cfg(model, x_traj, t_model, y_traj, y_null_traj, cfg_scale)
+        x_traj_pred = x_traj_0.clone()
+        x_traj_pred[:, 1:] = x_traj_pred[:, 1:] + torch.cumsum(v_final[:, :-1], dim=1) * dt
+
+        # Select candidates by Picard defect: ||T(x)-x|| on each trajectory.
+        v_pred = model_call_cfg(model, x_traj_pred, t_model, y_traj, y_null_traj, cfg_scale)
+        x_traj_pred_next = x_traj_0.clone()
+        x_traj_pred_next[:, 1:] = (
+            x_traj_pred_next[:, 1:] + torch.cumsum(v_pred[:, :-1], dim=1) * dt
+        )
+        residuals = calculate_residuals(x_traj_pred_next, x_traj_pred)
+        best_indices = torch.argmin(residuals, dim=0)
+        best_indices_history.append(best_indices.detach().cpu().flatten(start_dim=-2))
+
+        steps = torch.arange(num_steps, device=x_traj_pred.device)[:, None]
+        batch = torch.arange(batch_size, device=x_traj_pred.device)[None, :]
+
+        x_traj_best = x_traj_pred[best_indices, steps, batch]
+        v_best      = v_final[best_indices, steps, batch]
+
+        x_traj_new = x_traj_0.clone()
+        x_traj_new[0, :] = x_traj_best
+        for traj_id in range(1, num_trajs):
+            start_point = i if traj_id == 1 else (i + ((num_steps - traj_id) // traj_id))
+            start_point = max(min(start_point, num_steps - 1), 1)
+            x_traj_new[traj_id, :start_point] = x_traj_best[:start_point]
+            deltas = torch.arange(1, num_steps - start_point + 1, device=x.device, dtype=x.dtype).view(-1, 1, 1, 1, 1)
+            x_traj_new[traj_id, start_point:] = (
+                x_traj_new[traj_id, start_point - 1].unsqueeze(0)
+                + deltas
+                * v_best[start_point - 1] * dt
+            )
+
+        step_residuals = calculate_residuals(x_traj_new[0], x_traj[0])
+        residual_history.append(step_residuals.cpu().numpy().flatten())
+        x_traj = x_traj_new
+        if has_converged(step_residuals, threshold_schedule):
+            break
+
+    return x_traj[0, -1], {
+        "iters": iters,
+        "residual": float(torch.max(step_residuals).detach().cpu().item()),
+        "best_indices_history": best_indices_history,
         "residual_history": residual_history,
         "thresholds": threshold_schedule.detach().cpu().numpy().flatten().tolist(),
     }

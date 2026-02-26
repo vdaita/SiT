@@ -162,6 +162,7 @@ class SiT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        self.hidden_size = hidden_size
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -278,6 +279,39 @@ class SiT(nn.Module):
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
 
+class SiTWithAdditionalHead(SiT):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.head_1 = FinalLayer(self.hidden_size, self.patch_size, self.out_channels)
+
+    def freeze_all_but_head(self):
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+        for parameter in self.head_1.parameters():
+            parameter.requires_grad = True
+    
+    def forward(self, x, t, y):
+        """
+        Forward pass of SiT.
+        x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
+        t: (N,) tensor of diffusion timesteps
+        y: (N,) tensor of class labels
+        """
+        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        t = self.t_embedder(t)                   # (N, D)
+        y = self.y_embedder(y, self.training)    # (N, D)
+        c = t + y                                # (N, D)
+        for block in self.blocks:
+            x = block(x, c)                      # (N, T, D)
+        x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
+        x_head = self.head_1(x, c)
+
+        x = self.unpatchify(x)                   # (N, out_channels, H, W)
+        x_head = self.unpatchify(x_head)
+        if self.learn_sigma:
+            x, _ = x.chunk(2, dim=1)
+            x_head, _ = x.chunk(2, dim=1)
+        return x, x_head
 
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #
