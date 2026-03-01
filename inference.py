@@ -386,6 +386,7 @@ def two_picard_trajectory(
     num_steps: int,
     cfg_scale: float,
     threshold: float,
+    draft_threshold: float,
     show_progress: bool = False,
 ):
     batch_size, channels, height, width = x.shape
@@ -395,6 +396,9 @@ def two_picard_trajectory(
     t_model = t_traj.unsqueeze(-1).expand(num_steps, batch_size)
     threshold_schedule = compute_threshold_schedule(
         t_traj, threshold, batch_size * channels * height * width
+    )
+    draft_threshold_schedule = compute_threshold_schedule(
+        draft_threshold, threshold, batch_size * channels * height * width
     )
     y_traj = y.unsqueeze(0).expand(num_steps, batch_size)
     y_null_traj = y_null.unsqueeze(0).expand(num_steps, batch_size)
@@ -424,7 +428,7 @@ def two_picard_trajectory(
         step_residuals = calculate_residuals(x_traj, x_traj_new)
         draft_residual_history.append(step_residuals.cpu().numpy().flatten())
         x_traj = x_traj_new
-        if has_converged(step_residuals, threshold_schedule):
+        if has_converged(step_residuals, draft_threshold_schedule):
             break
 
     for i in base_range:

@@ -115,7 +115,8 @@ def main(args: Namespace):
     # draft_model = SiT_B_2_short(input_size=LATENT_SIZE).to(DEVICE)
     # draft_model.load_state_dict(find_model("./checkpoints/distill/comic-pond-39/draft_model_final.pt"))
     draft_model = SiT_B_2(input_size=LATENT_SIZE).to(DEVICE)
-    draft_model.load_state_dict(find_model("models/B.pt"))
+    # draft_model.load_state_dict(find_model("models/B.pt"))
+    draft_model.load_state_dict(find_model("checkpoints/distill/sage-darkness-53/draft_model_1000_ema.pt"))
     draft_model.freeze_all_but_last_k_layers(4)
 
     ema = EMA(draft_model, decay=0.995)
@@ -186,7 +187,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-train-steps", type=int, default=1500)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints/distill")
+    parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints/distill-picard")
     parser.add_argument("--checkpoint-every", type=int, default=500)
     parser.add_argument("--lr", type=float, default=3e-5)
     args = parser.parse_args()
