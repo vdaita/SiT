@@ -7,12 +7,12 @@ np.set_printoptions(suppress=True, precision=9, floatmode='maxprec')
 def calculate_residuals(x_new, x_old):
     return torch.mean(torch.abs(x_new - x_old) ** 2, dim=(-3, -2, -1))
 
-def compute_threshold_schedule(timesteps, threshold, dim):
-    return torch.tensor(threshold) 
+def compute_threshold_schedule(timesteps, threshold, dim, num_steps, batch_size):
+    sigma_t = (1 - timesteps)
+    return (threshold * threshold * (sigma_t ** 2)).unsqueeze(-1).expand(num_steps, batch_size) # we already take them ena
 
 def has_converged(step_residuals, threshold_schedule):
-    threshold_grid = torch.tensor(threshold_schedule).unsqueeze(-1).expand_as(step_residuals).to(step_residuals.device)
-    return (step_residuals < threshold_grid).all()
+    return (step_residuals < threshold_schedule).all()
 
 def model_call_cfg(model, x, t, y, y_null, cfg_scale: float):
     batch_size = x.shape[-4]
@@ -42,6 +42,33 @@ def model_call_cfg(model, x, t, y, y_null, cfg_scale: float):
     v_uncond = v.select(dim=-5, index=1)
     return v_uncond + cfg_scale * (v_cond - v_uncond)
 
+def call_picard_model(model, x, t, y, y_null, cfg_scale: float):
+    batch_size = x.shape[-4]
+    channels, height, width = x.shape[-3:]
+    leading_shape = x.shape[:-4]
+
+    x_model = torch.cat([x, x], dim=-4)
+    t_model = torch.cat([t, t], dim=-1)
+    y_model = torch.cat([y, y_null], dim=-1)
+
+    x_model_flat = x_model.reshape(-1, channels, height, width)
+    t_model_flat = t_model.reshape(-1)
+    y_model_flat = y_model.reshape(-1)
+
+    first_param = next(model.parameters(), None)
+    if first_param is not None:
+        model_device = first_param.device
+        model_dtype = first_param.dtype
+        x_model_flat = x_model_flat.to(device=model_device, dtype=model_dtype)
+        t_model_flat = t_model_flat.to(device=model_device, dtype=model_dtype)
+        y_model_flat = y_model_flat.to(device=model_device)
+
+    v_flats = model(x_model_flat, t_model_flat, y_model_flat)
+    vs = [v_flat.reshape(*leading_shape, 2, batch_size, channels, height, width) for v_flat in v_flats]
+    v_conds = [v.select(dim=-5, index=0) for v in vs]
+    v_unconds = [v.select(dim=-5, index=1) for v in vs]
+    return [v_uncond + cfg_scale * (v_cond - v_uncond) for (v_cond, v_uncond) in zip(v_conds, v_unconds)]  
+
 def speculative_trajectory(
     base_model,
     draft_model,
@@ -52,18 +79,22 @@ def speculative_trajectory(
     num_draft_steps: int,
     cfg_scale: float,
     threshold: float,
+    overlap: bool,
     show_progress: bool = False,
     progress_desc: str = "speculative",
 ):
     device = x.device
     batch_size, channels, height, width = x.shape
 
+    stream1, stream2 = torch.cuda.Stream(), torch.cuda.Stream()
+
     dt = 1.0 / num_steps
     t_traj = torch.arange(0, num_steps, device=device, dtype=x.dtype) / num_steps
     t_model = t_traj.unsqueeze(-1).expand(num_steps, batch_size)
     threshold_schedule = compute_threshold_schedule(
-        t_traj, threshold, batch_size * channels * height * width
+        t_traj, threshold, batch_size * channels * height * width, num_steps, batch_size
     )
+    # print("Threshold schedule: ", threshold_schedule)
     y_traj = y.unsqueeze(0).expand(num_steps, batch_size)
     y_null_traj = y_null.unsqueeze(0).expand(num_steps, batch_size)
 
@@ -89,41 +120,79 @@ def speculative_trajectory(
 
     for i in iter_range:
         outer_iters = i + 1
-        prev_draft_traj = draft_traj.clone()
-        next_draft_traj = prev_draft_traj.clone()
+        next_draft_traj = draft_traj.clone()
         guaranteed_prefix_len = min(i + 1, num_steps)
 
-        for j in range(1, num_draft_steps + 1):
-            v_draft_final = model_call_cfg(
-                draft_model,
-                next_draft_traj[j - 1],
-                t_model,
-                y_traj,
-                y_null_traj,
-                cfg_scale,
-            )
+        if overlap:
+            with torch.cuda.stream(stream1):
+                for j in range(1, num_draft_steps + 1):
+                    v_draft_final = model_call_cfg(
+                        draft_model,
+                        next_draft_traj[j - 1],
+                        t_model,
+                        y_traj,
+                        y_null_traj,
+                        cfg_scale,
+                    )
 
-            x_draft_traj = x_traj_0.clone()
-            x_draft_traj[:guaranteed_prefix_len] = x_traj[:guaranteed_prefix_len]
-            if guaranteed_prefix_len < num_steps:
-                v_draft_suffix_sum = torch.cumsum(v_draft_final[guaranteed_prefix_len - 1 :], dim=0)
-                x_draft_traj[guaranteed_prefix_len:] = (
-                    x_traj[guaranteed_prefix_len - 1].unsqueeze(0)
-                    + v_draft_suffix_sum[:-1] * dt
+                    x_draft_traj = x_traj_0.clone()
+                    x_draft_traj[:guaranteed_prefix_len] = x_traj[:guaranteed_prefix_len]
+                    if guaranteed_prefix_len < num_steps:
+                        v_sum = torch.cumsum(v_draft_final[guaranteed_prefix_len - 1:], dim=0)
+                        x_draft_traj[guaranteed_prefix_len:] = (
+                            x_traj[guaranteed_prefix_len - 1].unsqueeze(0) + v_sum[:-1] * dt
+                        )
+
+                    next_draft_traj[j] = x_draft_traj
+    
+            with torch.cuda.stream(stream2):
+                t_base = t_model.unsqueeze(0).expand(num_draft_steps + 1, num_steps, batch_size)
+                y_base = y_traj.unsqueeze(0).expand(num_draft_steps + 1, num_steps, batch_size)
+                y_null_base = y_null_traj.unsqueeze(0).expand(num_draft_steps + 1, num_steps, batch_size)
+                v_base_final = model_call_cfg(
+                    base_model,
+                    draft_traj,
+                    t_base,
+                    y_base,
+                    y_null_base,
+                    cfg_scale,
                 )
 
-            next_draft_traj[j] = x_draft_traj
-        t_base = t_model.unsqueeze(0).expand(num_draft_steps + 1, num_steps, batch_size)
-        y_base = y_traj.unsqueeze(0).expand(num_draft_steps + 1, num_steps, batch_size)
-        y_null_base = y_null_traj.unsqueeze(0).expand(num_draft_steps + 1, num_steps, batch_size)
-        v_base_final = model_call_cfg(
-            base_model,
-            next_draft_traj,
-            t_base,
-            y_base,
-            y_null_base,
-            cfg_scale,
-        )
+            stream1.synchronize()
+            stream2.synchronize()
+            draft_traj = next_draft_traj
+        else:
+            for j in range(1, num_draft_steps + 1):
+                v_draft_final = model_call_cfg(
+                    draft_model,
+                    next_draft_traj[j - 1],
+                    t_model,
+                    y_traj,
+                    y_null_traj,
+                    cfg_scale,
+                )
+
+                x_draft_traj = x_traj_0.clone()
+                x_draft_traj[:guaranteed_prefix_len] = x_traj[:guaranteed_prefix_len]
+                if guaranteed_prefix_len < num_steps:
+                    v_sum = torch.cumsum(v_draft_final[guaranteed_prefix_len - 1:], dim=0)
+                    x_draft_traj[guaranteed_prefix_len:] = (
+                        x_traj[guaranteed_prefix_len - 1].unsqueeze(0) + v_sum[:-1] * dt
+                    )
+
+                next_draft_traj[j] = x_draft_traj
+            draft_traj = next_draft_traj
+            t_base = t_model.unsqueeze(0).expand(num_draft_steps + 1, num_steps, batch_size)
+            y_base = y_traj.unsqueeze(0).expand(num_draft_steps + 1, num_steps, batch_size)
+            y_null_base = y_null_traj.unsqueeze(0).expand(num_draft_steps + 1, num_steps, batch_size)
+            v_base_final = model_call_cfg(
+                base_model,
+                draft_traj,
+                t_base,
+                y_base,
+                y_null_base,
+                cfg_scale,
+            )
 
         x_base_traj = x_traj_0.unsqueeze(0).expand(num_draft_steps + 1, num_steps, *x.shape).clone()
         x_base_traj[:, :guaranteed_prefix_len] = x_traj[:guaranteed_prefix_len].unsqueeze(0)
@@ -134,21 +203,22 @@ def speculative_trajectory(
                 + v_base_suffix_sum[:, :-1] * dt
             )
 
-        residual = torch.mean(torch.abs(x_base_traj - next_draft_traj), dim=(-1, -2, -3))
-        draft_residual_grid_history.append(residual.detach().cpu().flatten())
+        residual = torch.mean(torch.square(x_base_traj - draft_traj), dim=(1, -1, -2, -3))
+        draft_residual_grid_history.append(residual.detach().cpu())
         best_draft_indices = torch.argmin(residual, dim=0)
-        best_draft_indices_history.append(best_draft_indices.detach().cpu().flatten())
+        best_draft_indices_history.append(best_draft_indices.detach().cpu().flatten()) # [batch_size]
+        
         step_indices = torch.arange(num_steps, device=device).unsqueeze(1).expand(num_steps, batch_size)
         batch_indices = torch.arange(batch_size, device=device).unsqueeze(0).expand(num_steps, batch_size)
-        best_trajectory = x_base_traj[best_draft_indices, step_indices, batch_indices]
+        best_trajectory = x_base_traj[best_draft_indices.unsqueeze(0).expand(num_steps, batch_size), step_indices, batch_indices]
         best_trajectory[:guaranteed_prefix_len] = x_traj[:guaranteed_prefix_len]
 
         step_residuals = calculate_residuals(best_trajectory, x_traj)
         step_residual = torch.max(step_residuals)
         residual_history.append(step_residuals.detach().cpu().numpy().flatten())
         x_traj = best_trajectory
-        next_draft_traj[0] = x_traj
-        draft_traj = next_draft_traj
+        
+        draft_traj[0] = x_traj
 
         if has_converged(step_residuals, threshold_schedule):
             break
@@ -161,7 +231,6 @@ def speculative_trajectory(
         "draft_residual_grid_history": draft_residual_grid_history,
         "thresholds": threshold_schedule.detach().cpu().numpy().flatten().tolist(),
     }
-
 
 def picard_trajectory(
     model,
@@ -180,7 +249,7 @@ def picard_trajectory(
     t_traj = torch.arange(0, num_steps, device=x.device, dtype=x.dtype) / num_steps
     t_model = t_traj.unsqueeze(-1).expand(num_steps, batch_size)
     threshold_schedule = compute_threshold_schedule(
-        t_traj, threshold, batch_size * channels * height * width
+        t_traj, threshold, batch_size * channels * height * width, num_steps, batch_size
     )
     y_traj = y.unsqueeze(0).expand(num_steps, batch_size)
     y_null_traj = y_null.unsqueeze(0).expand(num_steps, batch_size)
@@ -299,7 +368,7 @@ def parareal(
     t_model = t_traj.unsqueeze(-1).expand(num_steps, batch_size)
 
     threshold_schedule = compute_threshold_schedule(
-        t_traj, threshold, batch_size * channels * height * width
+        t_traj, threshold, batch_size * channels * height * width, num_steps, batch_size
     )
 
     y_traj = y.unsqueeze(0).expand(num_steps, batch_size)
@@ -384,6 +453,7 @@ def two_picard_trajectory(
     y,
     y_null,
     num_steps: int,
+    num_draft_steps: int,
     cfg_scale: float,
     threshold: float,
     draft_threshold: float,
@@ -395,10 +465,10 @@ def two_picard_trajectory(
     t_traj = torch.arange(0, num_steps, device=x.device, dtype=x.dtype) / num_steps
     t_model = t_traj.unsqueeze(-1).expand(num_steps, batch_size)
     threshold_schedule = compute_threshold_schedule(
-        t_traj, threshold, batch_size * channels * height * width
+        t_traj, threshold, batch_size * channels * height * width, num_steps, batch_size,
     )
     draft_threshold_schedule = compute_threshold_schedule(
-        draft_threshold, threshold, batch_size * channels * height * width
+        t_traj, threshold, batch_size * channels * height * width, num_steps, batch_size
     )
     y_traj = y.unsqueeze(0).expand(num_steps, batch_size)
     y_null_traj = y_null.unsqueeze(0).expand(num_steps, batch_size)
@@ -413,7 +483,7 @@ def two_picard_trajectory(
     draft_residual_history = []
     base_residual_history = []
 
-    draft_range = range(num_steps)
+    draft_range = range(min(num_steps, num_draft_steps))
     base_range = range(num_steps)
     if show_progress:
         draft_range = tqdm(draft_range, desc="Draft Picard", leave=True)

@@ -4,7 +4,7 @@ Distill latents from the largest model to the smallest model.
 from argparse import Namespace
 import argparse
 import wandb
-from models import SiT_XL_2, SiT_S_2, SiT, SiT_XL_2_short, SiT_B_2, SiT_B_2_short
+from models import SiT_XL_2, SiT_S_2, SiT, SiT_B_2, SiT_B_2_short, SiT_B_2_WithHeads, SiT_S_2_WithHeads
 from download import find_model
 import torch
 from torch import nn
@@ -23,6 +23,7 @@ NUM_CLASSES = 1000
 NUM_STEPS = 32
 cfg_scale = 4.0
 hidden_weight_lambda = 0.1
+NUM_HEADS = 4
 
 torch.manual_seed(SEED)
 
@@ -107,31 +108,26 @@ def generate_picard_iteration_data(model, z, y, num_steps) -> List[DataResult]:
     return history
 
 def main(args: Namespace):
-    base_model = SiT_B_2(input_size=LATENT_SIZE).to(DEVICE)
-    base_model.load_state_dict(find_model("models/B.pt"))
+    # base_model = SiT_B_2(input_size=LATENT_SIZE).to(DEVICE)
+    # base_model.load_state_dict(find_model("models/B.pt"))
+    # base_model.eval()
+    # base_model.requires_grad_(False)
+
+    # draft_model = SiT_B_2_WithHeads(input_size=LATENT_SIZE, num_picard_heads=NUM_HEADS).to(DEVICE)
+    # draft_model.load_state_dict(find_model("models/B.pt"), strict=False)
+    # draft_model.freeze_all_but_last_k_layers(4)
+
+    base_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
+    base_model.load_state_dict(find_model("models/S.pt"))
     base_model.eval()
     base_model.requires_grad_(False)
 
-    # draft_model = SiT_B_2_short(input_size=LATENT_SIZE).to(DEVICE)
-    # draft_model.load_state_dict(find_model("./checkpoints/distill/comic-pond-39/draft_model_final.pt"))
-    draft_model = SiT_B_2(input_size=LATENT_SIZE).to(DEVICE)
-    # draft_model.load_state_dict(find_model("models/B.pt"))
-    draft_model.load_state_dict(find_model("checkpoints/distill/sage-darkness-53/draft_model_1000_ema.pt"))
+    draft_model = SiT_S_2_WithHeads(input_size=LATENT_SIZE, num_picard_heads=NUM_HEADS).to(DEVICE)
+    draft_model.load_state_dict(find_model("models/S.pt"), strict=False)
     draft_model.freeze_all_but_last_k_layers(4)
 
     ema = EMA(draft_model, decay=0.995)
     ema_draft_holder = copy.deepcopy(draft_model)
-
-    # base_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
-    # base_model.load_state_dict(find_model("models/S.pt"))
-    # base_model.eval()
-    # base_model.requires_grad_(False)
-
-    # draft_model = SiT_B_2_short(input_size=LATENT_SIZE).to(DEVICE)
-    # draft_model.load_state_dict(find_model("./checkpoints/distill/comic-pond-39/draft_model_final.pt"))
-    # draft_model = SiT_S_2(input_size=LATENT_SIZE).to(DEVICE)
-    # draft_model.load_state_dict(find_model("models/S.pt"))
-    # draft_model.freeze_all_but_last_k_layers(4)
 
     optimizer = torch.optim.Adam(draft_model.parameters(), lr=args.lr)
 
@@ -144,22 +140,22 @@ def main(args: Namespace):
         
         total_loss = 0
 
-        for i, data_slice in enumerate(history[:-1]):
-            draft_model_v, draft_model_hidden_states = draft_model(data_slice.input.z, data_slice.input.t, data_slice.input.y, return_hidden=True)
+        for i, data_slice in enumerate(history[:-(NUM_HEADS + 1)]):
+            draft_model_vs = draft_model(data_slice.input.z, data_slice.input.t, data_slice.input.y)
+            pred_vs = [vs.reshape(NUM_STEPS, args.batch_size * 2, 4, LATENT_SIZE, LATENT_SIZE) for vs in draft_model_vs]
+            pred_vs_cond = [vs[:, :args.batch_size] for vs in pred_vs]
+            pred_vs_uncond = [vs[:, args.batch_size:] for vs in pred_vs]
+
+            pred_vs = [pred_v_uncond + cfg_scale * (pred_v_cond - pred_v_uncond) for (pred_v_cond, pred_v_uncond) in zip(pred_vs_cond, pred_vs_uncond)]
+            target_vs = [(history[i + head_delta].z_output - data_slice.z_input) for head_delta in range(1, NUM_HEADS + 1)]
             
-            pred_v = draft_model_v.reshape(NUM_STEPS, args.batch_size * 2, 4, LATENT_SIZE, LATENT_SIZE)
-            pred_v_cond, pred_v_uncond = pred_v[:, :args.batch_size], pred_v[:, args.batch_size:]
-            pred_v = pred_v_uncond + cfg_scale * (pred_v_cond - pred_v_uncond)
-        
-            target_v = (history[-1].z_output - data_slice.z_input) / (len(history) - i - 1)
-
-            # print("pred v: ", pred_v.shape, " target v: ", target_v.shape, "last history output shape: ", history[-1].z_output.shape, data_slice.input.z.shape)
-
-            # print("input shape: ", data_slice.input.z.shape)
-            # print(i, (data_slice.input.z - history[-1].input.z).abs().mean().item(), ((data_slice.input.z - history[-1].input.z).abs() ** 2).mean(dim=(-2, -3, -4)).detach().cpu().numpy())
-            loss = F.mse_loss(pred_v, target_v)
+            step_losses = [F.mse_loss(pred_v, target_v) for pred_v, target_v in zip(pred_vs, target_vs)]
+            loss = torch.stack(step_losses).sum() / NUM_HEADS
+            
+            for step, step_loss in enumerate(step_losses):
+                wandb.log({f"picard_iter_loss/{i}_{step + 1}": step_loss.item()}, step=train_step)
             wandb.log({
-                f"picard_iter_loss/{i}": loss.item(),
+                f"picard_iter_loss/{i}_total": loss.item(),
             }, step=train_step)
             total_loss += loss.item()
             loss.backward()
@@ -168,7 +164,7 @@ def main(args: Namespace):
         optimizer.step()
         ema.update(draft_model)
 
-        norm = (NUM_STEPS // 2) * args.batch_size
+        norm = args.batch_size * (len(history) - (NUM_HEADS + 1))
         wandb.log({ # type: ignore
             "loss": total_loss / norm,
         }, step=train_step)

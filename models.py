@@ -292,16 +292,25 @@ class SiT(nn.Module):
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
 
-class SiTWithAdditionalHead(SiT):
-    def __init__(self, *args, **kwargs):
+class SiTWithAdditionalHeads(SiT):
+    def __init__(self, *args, num_picard_heads=1, **kwargs):
         super().__init__(*args, **kwargs)
-        self.head_1 = FinalLayer(self.hidden_size, self.patch_size, self.out_channels)
+        self.heads = nn.ModuleList([
+            FinalLayer(self.hidden_size, self.patch_size, self.out_channels)
+            for _ in range(num_picard_heads)
+        ])
 
-    def freeze_all_but_head(self):
+    def freeze_all_but_last_k_layers(self, k):
         for parameter in self.parameters():
             parameter.requires_grad = False
-        for parameter in self.head_1.parameters():
-            parameter.requires_grad = True
+        
+        for block in self.blocks[-k:]:
+            for parameter in block.parameters():
+                parameter.requires_grad = True
+
+        for head in self.heads:
+            for parameter in head.parameters():
+                parameter.requires_grad = True
     
     def forward(self, x, t, y):
         """
@@ -316,15 +325,12 @@ class SiTWithAdditionalHead(SiT):
         c = t + y                                # (N, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
-        x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
-        x_head = self.head_1(x, c)
-
-        x = self.unpatchify(x)                   # (N, out_channels, H, W)
-        x_head = self.unpatchify(x_head)
+        
+        head_x = [head(x, c) for head in self.heads]
+        head_x = [self.unpatchify(x) for x in head_x]
         if self.learn_sigma:
-            x, _ = x.chunk(2, dim=1)
-            x_head, _ = x.chunk(2, dim=1)
-        return x, x_head
+            head_x = [y.chunk(2, dim=1)[0] for y in head_x]
+        return head_x
 
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #
@@ -412,6 +418,9 @@ def SiT_B_2(**kwargs):
 def SiT_B_2_short(**kwargs):
     return SiT(depth=3, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
 
+def SiT_B_2_WithHeads(**kwargs):
+    return SiTWithAdditionalHeads(depth=3, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
+
 def SiT_B_4(**kwargs):
     return SiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
 
@@ -421,8 +430,8 @@ def SiT_B_8(**kwargs):
 def SiT_S_2(**kwargs):
     return SiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
 
-def SiT_S_2_short(**kwargs):
-    return SiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+def SiT_S_2_WithHeads(**kwargs):
+    return SiTWithAdditionalHeads(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
 
 def SiT_S_4(**kwargs):
     return SiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
