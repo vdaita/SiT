@@ -1367,6 +1367,93 @@ def _save_json(path: Path, payload: dict | list):
         json.dump(payload, f, indent=2)
 
 
+def _load_existing_experiments(results_path: Path) -> dict[str, dict]:
+    if not results_path.exists():
+        return {}
+    with open(results_path) as f:
+        data = json.load(f)
+    out = {}
+    for exp in data.get("experiments", []):
+        key = _experiment_key(
+            exp["method"],
+            exp["prompt_index"],
+            exp["threshold"],
+            exp.get("num_draft_iters"),
+        )
+        out[key] = exp
+    return out
+
+
+def _append_or_replace_experiment(
+    experiments_map: dict[str, dict], exp: dict
+) -> None:
+    key = _experiment_key(
+        exp["method"],
+        exp["prompt_index"],
+        exp["threshold"],
+        exp.get("num_draft_iters"),
+    )
+    experiments_map[key] = exp
+
+
+def _save_per_image_results(
+    output_dir: Path,
+    prompts: list[str],
+    experiments: list[dict],
+    num_steps: int,
+):
+    per_prompt = {str(i): {"prompt": p, "results": []} for i, p in enumerate(prompts)}
+
+    for exp in experiments:
+        pi = str(exp["prompt_index"])
+        if exp["method"] == "euler":
+            draft_iters = 0
+            base_iters = num_steps
+        elif exp["method"] == "picard":
+            draft_iters = 0
+            base_iters = int(exp.get("iters", 0))
+        else:
+            draft_iters = int(exp.get("draft_iters_actual", 0))
+            base_iters = int(exp.get("base_iters_actual", 0))
+
+        per_prompt[pi]["results"].append(
+            {
+                "method": exp["method"],
+                "threshold": exp["threshold"],
+                "num_draft_iters": exp.get("num_draft_iters"),
+                "draft_iters_actual": draft_iters,
+                "base_iters_actual": base_iters,
+                "total_iters": draft_iters + base_iters,
+                "equiv_sequential_evals": exp.get("equiv_sequential_evals"),
+                "time_s": exp.get("time_s"),
+                "final_residual": exp.get("final_residual"),
+            }
+        )
+
+    _save_json(output_dir / "per_image_results.json", per_prompt)
+
+
+@torch.no_grad()
+def _save_intermediate_image(
+    vae: AutoencoderKLFlux2 | None,
+    latents: torch.Tensor,
+    latent_ids: torch.Tensor,
+    image_path: Path,
+) -> None:
+    if vae is None:
+        return
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    if image_path.exists():
+        return
+
+    vae_device = next(vae.parameters()).device
+    vae_dtype = next(vae.parameters()).dtype
+    lat = latents.to(device=vae_device, dtype=vae_dtype)
+    l_ids = latent_ids.to(device=vae_device)
+    img = decode_latent(vae, lat, l_ids)
+    img.save(image_path)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Benchmark runner
 # ──────────────────────────────────────────────────────────────────────
@@ -1397,8 +1484,16 @@ def run_benchmarks(
     output_dir.mkdir(parents=True, exist_ok=True)
     images_dir = output_dir / "images"
     images_dir.mkdir(exist_ok=True)
+    intermediate_images_dir = images_dir / "intermediate"
+    intermediate_images_dir.mkdir(exist_ok=True)
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
+    metadata_dir = output_dir / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    results_path = output_dir / "results.json"
+    existing_experiments = _load_existing_experiments(results_path)
+    experiments_map = dict(existing_experiments)
 
     num_train_timesteps = 1000
     vae_scale_factor = 8
@@ -1476,6 +1571,11 @@ def run_benchmarks(
     )
     print(f"  sigmas: {sigmas.shape} (mu={mu:.4f})")
 
+    vae = None
+    if save_images:
+        print("\nLoading VAE for intermediate/final image decoding...")
+        vae = load_vae(base_model_id, dtype, device)
+
     # ==================================================================
     # PHASE 1: Euler baseline (base model, threshold-independent)
     # ==================================================================
@@ -1493,54 +1593,81 @@ def run_benchmarks(
                 f"\n  Euler [{pi+1}/{len(prompts)}]: "
                 f"\"{prompt[:50]}...\""
             )
-            latents_euler = latents_init.clone()
-            t0 = time.perf_counter()
+            euler_lat_path = output_dir / f"euler_latent_p{pi:02d}.pt"
+            euler_meta_path = metadata_dir / f"euler_p{pi:02d}.json"
+            cached_euler = _load_json_if_exists(euler_meta_path)
 
-            for step_i in range(num_steps):
-                latents_euler = denoise_step(
-                    transformer=base_transformer,
-                    latents=latents_euler,
-                    latent_ids=latent_ids,
-                    prompt_embeds=base_all_pe[pi],
-                    text_ids=base_all_ti[pi],
-                    sigma=float(sigmas[step_i]),
-                    sigma_next=float(sigmas[step_i + 1]),
-                    num_train_timesteps=num_train_timesteps,
-                    negative_prompt_embeds=base_neg_pe,
-                    negative_text_ids=base_neg_ti,
-                    guidance_scale=guidance_scale,
+            if euler_lat_path.exists() and cached_euler is not None:
+                print("    cache hit: reusing existing Euler latent + metadata")
+                elapsed = float(cached_euler["time_s"])
+                equiv_evals = float(cached_euler["equiv_sequential_evals"])
+            else:
+                latents_euler = latents_init.clone()
+                t0 = time.perf_counter()
+
+                for step_i in range(num_steps):
+                    latents_euler = denoise_step(
+                        transformer=base_transformer,
+                        latents=latents_euler,
+                        latent_ids=latent_ids,
+                        prompt_embeds=base_all_pe[pi],
+                        text_ids=base_all_ti[pi],
+                        sigma=float(sigmas[step_i]),
+                        sigma_next=float(sigmas[step_i + 1]),
+                        num_train_timesteps=num_train_timesteps,
+                        negative_prompt_embeds=base_neg_pe,
+                        negative_text_ids=base_neg_ti,
+                        guidance_scale=guidance_scale,
+                    )
+                    _save_intermediate_image(
+                        vae=vae,
+                        latents=latents_euler,
+                        latent_ids=latent_ids,
+                        image_path=(
+                            intermediate_images_dir
+                            / f"euler_p{pi:02d}_s{step_i+1:03d}.png"
+                        ),
+                    )
+
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                elapsed = time.perf_counter() - t0
+
+                equiv_evals = compute_equiv_sequential_evals(
+                    "euler", num_steps, guidance_scale
                 )
 
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            elapsed = time.perf_counter() - t0
-
-            equiv_evals = compute_equiv_sequential_evals(
-                "euler", num_steps, guidance_scale
-            )
-
-            for thresh in thresholds:
-                experiments.append(
+                torch.save(latents_euler.cpu(), euler_lat_path)
+                _save_json(
+                    euler_meta_path,
                     {
                         "method": "euler",
                         "prompt_index": pi,
                         "prompt": prompt,
-                        "threshold": thresh,
-                        "num_steps": num_steps,
                         "time_s": elapsed,
                         "equiv_sequential_evals": equiv_evals,
-                        "nfe": num_steps
-                        * (2 if guidance_scale > 1 else 1),
-                        "final_residual": 0.0,
-                        "residual_history": [],
-                    }
+                        "nfe": num_steps * (2 if guidance_scale > 1 else 1),
+                    },
+                )
+                print(
+                    f"    done in {elapsed:.2f}s, "
+                    f"equiv_evals={equiv_evals:.1f}"
                 )
 
-            torch.save(
-                latents_euler.cpu(),
-                output_dir / f"euler_latent_p{pi:02d}.pt",
-            )
-            print(f"    done in {elapsed:.2f}s, equiv_evals={equiv_evals:.1f}")
+            for thresh in thresholds:
+                exp = {
+                    "method": "euler",
+                    "prompt_index": pi,
+                    "prompt": prompt,
+                    "threshold": thresh,
+                    "num_steps": num_steps,
+                    "time_s": elapsed,
+                    "equiv_sequential_evals": equiv_evals,
+                    "nfe": num_steps * (2 if guidance_scale > 1 else 1),
+                    "final_residual": 0.0,
+                    "residual_history": [],
+                }
+                _append_or_replace_experiment(experiments_map, exp)
 
         del base_transformer
         if device.type == "cuda":
@@ -1563,38 +1690,47 @@ def run_benchmarks(
                 f"\n  Picard [thresh={thresh}, prompt {pi+1}/{len(prompts)}]: "
                 f"\"{prompt[:50]}...\""
             )
-            t0 = time.perf_counter()
-
-            latents_p, info_p = picard_trajectory(
-                transformer=base_transformer,
-                x_init=latents_init.clone(),
-                latent_ids=latent_ids,
-                prompt_embeds=base_all_pe[pi],
-                text_ids=base_all_ti[pi],
-                sigmas=sigmas,
-                num_train_timesteps=num_train_timesteps,
-                negative_prompt_embeds=base_neg_pe,
-                negative_text_ids=base_neg_ti,
-                guidance_scale=guidance_scale,
-                threshold=thresh,
-                max_picard_iters=num_steps,
-                show_progress=True,
-                save_intermediates=False,
+            final_path = output_dir / f"picard_latent_p{pi:02d}_t{thresh:.2f}.pt"
+            meta_path = _metadata_path(
+                metadata_dir, "picard", pi, thresh, None
             )
+            cached_exp = _load_json_if_exists(meta_path)
 
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            elapsed = time.perf_counter() - t0
+            if final_path.exists() and cached_exp is not None:
+                print("    cache hit: reusing existing Picard latent + metadata")
+                exp = cached_exp
+            else:
+                t0 = time.perf_counter()
 
-            equiv_evals = compute_equiv_sequential_evals(
-                "picard",
-                num_steps,
-                guidance_scale,
-                iters=info_p["iters"],
-            )
+                latents_p, info_p = picard_trajectory(
+                    transformer=base_transformer,
+                    x_init=latents_init.clone(),
+                    latent_ids=latent_ids,
+                    prompt_embeds=base_all_pe[pi],
+                    text_ids=base_all_ti[pi],
+                    sigmas=sigmas,
+                    num_train_timesteps=num_train_timesteps,
+                    negative_prompt_embeds=base_neg_pe,
+                    negative_text_ids=base_neg_ti,
+                    guidance_scale=guidance_scale,
+                    threshold=thresh,
+                    max_picard_iters=num_steps,
+                    show_progress=True,
+                    save_intermediates=True,
+                )
 
-            experiments.append(
-                {
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                elapsed = time.perf_counter() - t0
+
+                equiv_evals = compute_equiv_sequential_evals(
+                    "picard",
+                    num_steps,
+                    guidance_scale,
+                    iters=info_p["iters"],
+                )
+
+                exp = {
                     "method": "picard",
                     "prompt_index": pi,
                     "prompt": prompt,
@@ -1609,16 +1745,32 @@ def run_benchmarks(
                     "final_residual": info_p["residual"],
                     "residual_history": info_p["residual_history"],
                 }
-            )
 
-            torch.save(
-                latents_p.cpu(),
-                output_dir / f"picard_latent_p{pi:02d}_t{thresh:.2f}.pt",
-            )
-            print(
-                f"    done in {elapsed:.2f}s, iters={info_p['iters']}, "
-                f"equiv_evals={equiv_evals:.1f}"
-            )
+                torch.save(latents_p.cpu(), final_path)
+
+                for iter_idx, lat in enumerate(
+                    info_p.get("intermediate_latents", []), start=1
+                ):
+                    _save_intermediate_image(
+                        vae=vae,
+                        latents=lat,
+                        latent_ids=latent_ids,
+                        image_path=(
+                            intermediate_images_dir
+                            / (
+                                f"picard_p{pi:02d}_t{thresh:.2f}"
+                                f"_iter{iter_idx:03d}.png"
+                            )
+                        ),
+                    )
+
+                _save_json(meta_path, exp)
+                print(
+                    f"    done in {elapsed:.2f}s, iters={exp['iters']}, "
+                    f"equiv_evals={equiv_evals:.1f}"
+                )
+
+            _append_or_replace_experiment(experiments_map, exp)
 
     del base_transformer
     if device.type == "cuda":
@@ -1645,50 +1797,64 @@ def run_benchmarks(
                     f"\n  Two-Picard [thresh={thresh}, draft_iters={ds}, "
                     f"prompt {pi+1}/{len(prompts)}]: \"{prompt[:50]}...\""
                 )
-                t0 = time.perf_counter()
-
-                latents_tp, info_tp = two_picard_trajectory(
-                    base_transformer=base_transformer,
-                    draft_transformer=draft_transformer,
-                    x_init=latents_init.clone(),
-                    latent_ids=latent_ids,
-                    # Base model embeddings (9B encoder)
-                    base_prompt_embeds=base_all_pe[pi],
-                    base_text_ids=base_all_ti[pi],
-                    base_negative_prompt_embeds=base_neg_pe,
-                    base_negative_text_ids=base_neg_ti,
-                    # Draft model embeddings (4B encoder)
-                    draft_prompt_embeds=draft_all_pe[pi],
-                    draft_text_ids=draft_all_ti[pi],
-                    draft_negative_prompt_embeds=draft_neg_pe,
-                    draft_negative_text_ids=draft_neg_ti,
-                    # Config
-                    sigmas=sigmas,
-                    num_train_timesteps=num_train_timesteps,
-                    guidance_scale=guidance_scale,
-                    threshold=thresh,
-                    draft_threshold=thresh * 2.0,
-                    num_draft_iters=ds,
-                    max_base_iters=num_steps,
-                    show_progress=True,
-                    save_intermediates=False,
+                final_path = (
+                    output_dir / f"two_picard_latent_p{pi:02d}_t{thresh:.2f}_d{ds}.pt"
                 )
-
-                if device.type == "cuda":
-                    torch.cuda.synchronize()
-                elapsed = time.perf_counter() - t0
-
-                equiv_evals = compute_equiv_sequential_evals(
-                    "two_picard",
-                    num_steps,
-                    guidance_scale,
-                    draft_iters=info_tp["draft_iters"],
-                    base_iters=info_tp["base_iters"],
-                    draft_cost_ratio=draft_cost_ratio,
+                meta_path = _metadata_path(
+                    metadata_dir, "two_picard", pi, thresh, ds
                 )
+                cached_exp = _load_json_if_exists(meta_path)
 
-                experiments.append(
-                    {
+                if final_path.exists() and cached_exp is not None:
+                    print(
+                        "    cache hit: reusing existing Two-Picard "
+                        "latent + metadata"
+                    )
+                    exp = cached_exp
+                else:
+                    t0 = time.perf_counter()
+
+                    latents_tp, info_tp = two_picard_trajectory(
+                        base_transformer=base_transformer,
+                        draft_transformer=draft_transformer,
+                        x_init=latents_init.clone(),
+                        latent_ids=latent_ids,
+                        # Base model embeddings (9B encoder)
+                        base_prompt_embeds=base_all_pe[pi],
+                        base_text_ids=base_all_ti[pi],
+                        base_negative_prompt_embeds=base_neg_pe,
+                        base_negative_text_ids=base_neg_ti,
+                        # Draft model embeddings (4B encoder)
+                        draft_prompt_embeds=draft_all_pe[pi],
+                        draft_text_ids=draft_all_ti[pi],
+                        draft_negative_prompt_embeds=draft_neg_pe,
+                        draft_negative_text_ids=draft_neg_ti,
+                        # Config
+                        sigmas=sigmas,
+                        num_train_timesteps=num_train_timesteps,
+                        guidance_scale=guidance_scale,
+                        threshold=thresh,
+                        draft_threshold=thresh * 2.0,
+                        num_draft_iters=ds,
+                        max_base_iters=num_steps,
+                        show_progress=True,
+                        save_intermediates=True,
+                    )
+
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    elapsed = time.perf_counter() - t0
+
+                    equiv_evals = compute_equiv_sequential_evals(
+                        "two_picard",
+                        num_steps,
+                        guidance_scale,
+                        draft_iters=info_tp["draft_iters"],
+                        base_iters=info_tp["base_iters"],
+                        draft_cost_ratio=draft_cost_ratio,
+                    )
+
+                    exp = {
                         "method": "two_picard",
                         "prompt_index": pi,
                         "prompt": prompt,
@@ -1717,19 +1883,36 @@ def run_benchmarks(
                             + info_tp["base_residual_history"]
                         ),
                     }
-                )
 
-                torch.save(
-                    latents_tp.cpu(),
-                    output_dir
-                    / f"two_picard_latent_p{pi:02d}_t{thresh:.2f}_d{ds}.pt",
-                )
-                print(
-                    f"    done in {elapsed:.2f}s, "
-                    f"draft={info_tp['draft_iters']}, "
-                    f"base={info_tp['base_iters']}, "
-                    f"equiv_evals={equiv_evals:.1f}"
-                )
+                    torch.save(latents_tp.cpu(), final_path)
+
+                    lat_list = info_tp.get("intermediate_latents", [])
+                    label_list = info_tp.get("intermediate_labels", [])
+                    for iter_idx, (lat, label) in enumerate(
+                        zip(lat_list, label_list), start=1
+                    ):
+                        _save_intermediate_image(
+                            vae=vae,
+                            latents=lat,
+                            latent_ids=latent_ids,
+                            image_path=(
+                                intermediate_images_dir
+                                / (
+                                    f"two_picard_p{pi:02d}_t{thresh:.2f}_d{ds}"
+                                    f"_iter{iter_idx:03d}_{label}.png"
+                                )
+                            ),
+                        )
+
+                    _save_json(meta_path, exp)
+                    print(
+                        f"    done in {elapsed:.2f}s, "
+                        f"draft={info_tp['draft_iters']}, "
+                        f"base={info_tp['base_iters']}, "
+                        f"equiv_evals={equiv_evals:.1f}"
+                    )
+
+                _append_or_replace_experiment(experiments_map, exp)
 
     del draft_transformer, base_transformer
     if device.type == "cuda":
@@ -1738,42 +1921,38 @@ def run_benchmarks(
     # ==================================================================
     # Save results JSON
     # ==================================================================
+    experiments = list(experiments_map.values())
     results = {"config": config, "experiments": experiments}
-    results_path = output_dir / "results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to {results_path}")
 
+    _save_per_image_results(output_dir, prompts, experiments, num_steps)
+
     # ==================================================================
     # Decode and save images
     # ==================================================================
-    if save_images:
-        print("\nLoading VAE for image decoding...")
-        # Use base model's VAE for final decoding
-        vae = load_vae(base_model_id, dtype, device)
+    if save_images and vae is not None:
+        print("\nSaving final images...")
 
         if not skip_euler:
             for pi in range(len(prompts)):
                 lat_path = output_dir / f"euler_latent_p{pi:02d}.pt"
                 if lat_path.exists():
-                    lat = torch.load(
-                        lat_path, weights_only=True
-                    ).to(device)
+                    lat = torch.load(lat_path, weights_only=True).to(device)
                     img = decode_latent(vae, lat, latent_ids)
                     img.save(images_dir / f"euler_p{pi:02d}.png")
                     print(f"  Saved: euler_p{pi:02d}.png")
 
-        # Decode representative set (first prompt, each config)
-        for pi in [0]:
+        # Decode all final outputs
+        for pi in range(len(prompts)):
             for thresh in thresholds:
                 lat_path = (
                     output_dir
                     / f"picard_latent_p{pi:02d}_t{thresh:.2f}.pt"
                 )
                 if lat_path.exists():
-                    lat = torch.load(
-                        lat_path, weights_only=True
-                    ).to(device)
+                    lat = torch.load(lat_path, weights_only=True).to(device)
                     img = decode_latent(vae, lat, latent_ids)
                     img.save(
                         images_dir
@@ -1789,9 +1968,7 @@ def run_benchmarks(
                         / f"two_picard_latent_p{pi:02d}_t{thresh:.2f}_d{ds}.pt"
                     )
                     if lat_path.exists():
-                        lat = torch.load(
-                            lat_path, weights_only=True
-                        ).to(device)
+                        lat = torch.load(lat_path, weights_only=True).to(device)
                         img = decode_latent(vae, lat, latent_ids)
                         img.save(
                             images_dir
@@ -1800,6 +1977,8 @@ def run_benchmarks(
                         print(
                             f"  Saved: two_picard_p{pi:02d}_t{thresh:.2f}_d{ds}.png"
                         )
+
+        print(f"  Saved intermediate images to: {intermediate_images_dir}")
 
         del vae
         if device.type == "cuda":
@@ -1894,14 +2073,13 @@ def run_benchmarks(
 
         print()
 
-    # Clean up intermediate latent files
-    print("Cleaning up intermediate latent files...")
-    for pt_file in output_dir.glob("*.pt"):
-        pt_file.unlink()
+    print("Keeping latent files for resume/caching.")
 
     print(f"\nAll results in: {output_dir}/")
     print(f"  results.json  — raw experiment data")
+    print(f"  per_image_results.json — per-prompt step/cost summary")
     print(f"  images/       — decoded images")
+    print(f"  images/intermediate/ — decoded trajectory snapshots")
     print(f"  plots/        — comparison charts:")
     print(f"    cost_vs_draft_iters_thresh_*.png  — THE key cost comparison")
     print(f"    convergence_thresh_*.png           — residual convergence curves")
