@@ -5,7 +5,18 @@ from dataclasses import asdict, dataclass
 
 from tqdm import tqdm
 
-from eval_common import CFG_SCALE, NUM_IMAGES, get_available_models, load_model, make_eval_batch, result_exists, save_result
+from eval_common import (
+    CFG_SCALE,
+    NUM_IMAGES,
+    get_available_models,
+    get_vae,
+    images_complete,
+    load_model,
+    make_eval_batch,
+    result_exists,
+    save_decoded_image,
+    save_result,
+)
 from inference import speculative_trajectory
 from typing import TypedDict, List
 import torch
@@ -45,6 +56,7 @@ class SpeculativeStat:
 def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
     available = set(get_available_models())
     x, y, y_null = make_eval_batch(num_images)
+    vae = get_vae()
 
     for pair in tqdm(SPECULATIVE_CONFIGS, desc="speculative pairs"):
         if pair["draft"] not in available or pair["base"] not in available:
@@ -60,13 +72,13 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                         f"_steps_{num_steps}_threshold_{threshold}_draft_k_{pair['spec_k']}"
                         f"_{'overlap' if overlap else 'sequential'}"
                     )
-                    if not force and result_exists(SPEC_NAME, eval_key):
+                    if not force and result_exists(SPEC_NAME, eval_key) and images_complete(SPEC_NAME, eval_key, num_images):
                         continue
 
                     records = []
                     for idx in tqdm(range(num_images), desc=eval_key, leave=False):
                         t0 = time.perf_counter()
-                        _, stats = speculative_trajectory(
+                        output, stats = speculative_trajectory(
                             base_model,
                             draft_model,
                             x[idx],
@@ -78,6 +90,8 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                             threshold,
                             overlap=overlap,
                         )
+                        decoded_image = vae.decode(output / 0.18215).sample
+                        save_decoded_image(SPEC_NAME, eval_key, idx, decoded_image)
                         records.append(
                             asdict(
                                 SpeculativeStat(

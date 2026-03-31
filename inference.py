@@ -1,4 +1,4 @@
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 import torch
 from tqdm import tqdm
 import numpy as np
@@ -217,6 +217,101 @@ class PicardResult:
     iters: List[int] # of length num_thresholds
     durations: List[float] # of length num_thresholds
 
+def piecewise_picard_trajectory(
+    model,
+    x,
+    y,
+    y_null,
+    num_steps: int,
+    cfg_scale: float,
+    threshold: float,
+    group_size: int, # how many can you infer at a given time?
+    prev_x_traj: Optional[torch.Tensor] = None,
+):
+    batch_size, channels, height, width = x.shape
+    dt = 1.0 / num_steps
+    
+    t_traj = torch.arange(0, num_steps, device=x.device, dtype=x.dtype) / num_steps
+    t_model = t_traj.unsqueeze(-1).expand(num_steps, batch_size)
+    
+    threshold_schedule = compute_threshold_schedule(
+        t_traj, threshold, batch_size * channels * height * width, num_steps, batch_size
+    )
+
+    y_traj = y.unsqueeze(0).expand(num_steps, batch_size)
+    y_null_traj = y_null.unsqueeze(0).expand(num_steps, batch_size)
+
+    x_traj_0 = x.unsqueeze(0).expand(num_steps, batch_size, channels, height, width)
+    x_traj = x_traj_0.clone() if (prev_x_traj is None) else prev_x_traj
+
+    start_index = 0
+    num_iterations = 0
+
+    while start_index < num_steps - 1:
+        x_traj_slice = x_traj[start_index : min(num_steps, start_index + group_size)]
+        y_traj_slice = y_traj[start_index : min(num_steps, start_index + group_size)]
+        y_null_traj_slice = y_null_traj[start_index : min(num_steps, start_index + group_size)]
+        t_model_slice = t_model[start_index : min(num_steps, start_index + group_size)]
+        threshold_schedule_slice = threshold_schedule[start_index : min(num_steps, start_index + group_size)]
+
+        v_model = model_call_cfg(model, x_traj_slice, t_model_slice, y_traj_slice, y_null_traj_slice, cfg_scale)
+        x_traj_new = x_traj_0.clone()
+        x_traj_new[:start_index + 1] = x_traj[:start_index + 1] # up to and including the start index the value remains the same
+        x_traj_new[start_index + 1 : min(num_steps, start_index + group_size)] = x_traj[start_index] + torch.cumsum(v_model[:-1], dim=0) * dt
+
+        step_residuals = calculate_residuals(x_traj, x_traj_new)
+        step_residuals_slice = step_residuals[start_index : min(num_steps, start_index + group_size)]
+        mask = step_residuals_slice >= threshold_schedule_slice
+        idx = torch.nonzero(mask, as_tuple=False)[0].item() if mask.any() else -1
+        
+        increment_amount = min(num_steps, start_index + group_size) - start_index
+        if idx != -1:
+            assert isinstance(idx, int), "idx (from the mask and what not) must be an int"
+            increment_amount = max(idx - 1, 0) # the point of this is to keep the last converged as the starting point for the next sequence
+        start_index += increment_amount
+
+        x_traj = x_traj_new
+        num_iterations += 1
+
+    return x_traj, num_iterations
+
+def interp_steps(
+    trajectory: torch.Tensor,
+    multiple: int
+):
+    num_steps, batch_size, channels, height, width = trajectory.shape
+    new_trajectory = trajectory.unsqueeze(1).expand(num_steps, multiple, batch_size, channels, height, width)
+    new_trajectory = new_trajectory.reshape(num_steps * multiple, batch_size, channels, height, width)
+    for i in range(num_steps - 1):
+        for m in range(1, multiple):
+            alpha = m / multiple
+            new_trajectory[i * multiple + m] = (1 - alpha) * trajectory[i] + alpha * trajectory[i + 1]
+    return new_trajectory
+
+def upscaling_piecewise_picard(
+    model,
+    x,
+    y,
+    y_null,
+    num_steps_init: int,
+    multiples: List[int], # how many multiples do you want to increase this by?
+    cfg_scale: float,
+    threshold: float,
+    group_size: int,
+):
+    # calculate the first trajectory
+    x_traj, num_iterations_first = piecewise_picard_trajectory(model=model, x=x, y=y, y_null=y_null, num_steps=num_steps_init, cfg_scale=cfg_scale, threshold=threshold, group_size=group_size)
+    num_iterations_total = num_iterations_first
+    curr_num_steps = num_steps_init
+
+    for multiple in multiples:
+        x_traj = interp_steps(x_traj, multiple)
+        curr_num_steps = curr_num_steps * multiple
+        x_traj, num_iterations_step = piecewise_picard_trajectory(model=model, x=x, y=y, y_null=y_null, num_steps=curr_num_steps, cfg_scale=cfg_scale, threshold=threshold, group_size=group_size, prev_x_traj=x_traj)
+        num_iterations_total += num_iterations_step
+    
+    return x_traj[-1], num_iterations_total
+    
 def picard_trajectory(
     model,
     x,

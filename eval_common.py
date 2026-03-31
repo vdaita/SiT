@@ -123,6 +123,13 @@ def save_decoded_image(spec_name: str, eval_key: str, image_idx: int, decoded: t
     return read_image(f"{image_dir}/img_{image_idx:03d}.png")
 
 
+def images_complete(spec_name: str, eval_key: str, num_images: int) -> bool:
+    image_dir = IMAGES_DIR / spec_name / eval_key
+    if not image_dir.exists():
+        return False
+    return len(list(image_dir.glob("img_*.png"))) >= num_images
+
+
 def make_eval_batch(num_images: int) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
     torch.manual_seed(SEED)
     x = [torch.randn(BATCH_SIZE, 4, LATENT_SIZE, LATENT_SIZE, device=DEVICE) for _ in range(num_images)]
