@@ -391,9 +391,6 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #                                   SiT Configs                                  #
 #################################################################################
 
-def SiT_XL_2_short(**kwargs):
-    return SiT(depth=7, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
-
 def SiT_XL_2(**kwargs):
     return SiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
 
@@ -415,12 +412,6 @@ def SiT_L_8(**kwargs):
 def SiT_B_2(**kwargs):
     return SiT(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
 
-def SiT_B_2_short(**kwargs):
-    return SiT(depth=3, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
-
-def SiT_B_2_WithHeads(**kwargs):
-    return SiTWithAdditionalHeads(depth=3, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
-
 def SiT_B_4(**kwargs):
     return SiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
 
@@ -430,15 +421,11 @@ def SiT_B_8(**kwargs):
 def SiT_S_2(**kwargs):
     return SiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
 
-def SiT_S_2_WithHeads(**kwargs):
-    return SiTWithAdditionalHeads(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
-
 def SiT_S_4(**kwargs):
     return SiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
 
 def SiT_S_8(**kwargs):
     return SiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
-
 
 SiT_models = {
     'SiT-XL/2': SiT_XL_2,  'SiT-XL/4': SiT_XL_4,  'SiT-XL/8': SiT_XL_8,
