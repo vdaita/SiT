@@ -9,6 +9,7 @@ from typing import Any
 import torch
 from diffusers.models import AutoencoderKL
 from torchvision.utils import save_image
+from torchvision.io import read_image
 
 from download import find_model
 from models import SiT_B_2, SiT_L_2, SiT_S_2
@@ -107,7 +108,7 @@ def vae_decode(vae: AutoencoderKL, latent: torch.Tensor) -> torch.Tensor:
     return vae.decode(latent / 0.18215).sample
 
 
-def save_decoded_image(spec_name: str, eval_key: str, image_idx: int, decoded: torch.Tensor) -> None:
+def save_decoded_image(spec_name: str, eval_key: str, image_idx: int, decoded: torch.Tensor) -> torch.Tensor:
     ensure_output_dirs()
     image_dir = IMAGES_DIR / spec_name / eval_key
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -118,6 +119,8 @@ def save_decoded_image(spec_name: str, eval_key: str, image_idx: int, decoded: t
         normalize=True,
         value_range=(-1, 1),
     )
+    
+    return read_image(f"{image_dir}/img_{image_idx:03d}.png")
 
 
 def make_eval_batch(num_images: int) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:

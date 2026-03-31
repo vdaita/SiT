@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import torch
+
 from dataclasses import asdict, dataclass
 from typing import List
 
@@ -64,4 +66,5 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    run()
+    with torch.no_grad():
+        run()

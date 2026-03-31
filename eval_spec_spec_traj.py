@@ -8,6 +8,7 @@ from tqdm import tqdm
 from eval_common import CFG_SCALE, NUM_IMAGES, get_available_models, load_model, make_eval_batch, result_exists, save_result
 from inference import speculative_trajectory
 from typing import TypedDict, List
+import torch
 
 SPEC_NAME = "speculative"
 
@@ -100,4 +101,5 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    run()
+    with torch.no_grad():
+        run()

@@ -8,6 +8,7 @@ from datasets import Dataset, load_dataset
 from torchmetrics.image.kid import KernelInceptionDistance
 from torchvision import transforms
 from tqdm import tqdm
+from collections import defaultdict
 
 from eval_common import (
     CFG_SCALE,
@@ -56,7 +57,7 @@ image_transform = transforms.Compose(
     [
         transforms.Resize(256),
         transforms.CenterCrop(256),
-        transforms.ToTensor(),
+        transforms.PILToTensor(),
     ]
 )
 
@@ -66,7 +67,7 @@ two_picard_grid_configs: List[TwoPicardGridConfig] = [
         "base": "B",
         "num_steps": 32,
         "num_classes": 32,
-        "images_per_class": 32,
+        "images_per_class": 1,
         "pairs": [
             {"draft_iters": 8, "base_iters": 2},
             {"draft_iters": 8, "base_iters": 4},
@@ -100,8 +101,12 @@ two_picard_grid_configs: List[TwoPicardGridConfig] = [
 
 def run(force: bool = False) -> None:
     available = set(get_available_models())
-    ds = load_dataset("ILSVRC/imagenet-1k", split="validation")
+    ds = load_dataset("evanarlian/imagenet_1k_resized_256", split="val") # avoid downloading full-res images
     vae = get_vae()
+
+    label_to_indices = defaultdict(list)
+    for i, label in enumerate(ds["label"]):
+        label_to_indices[label].append(i)
 
     for model_size_pair in tqdm(two_picard_grid_configs, desc="grid model pairs"):
         if model_size_pair["draft"] not in available or model_size_pair["base"] not in available:
@@ -124,7 +129,7 @@ def run(force: bool = False) -> None:
             if not force and result_exists(SPEC_NAME, eval_key):
                 continue
 
-            selected_images = ds.filter(lambda row: row["label"] == class_idx)  # type: Dataset
+            selected_images = ds.select(label_to_indices[class_idx])  # type: Dataset
             real_images = selected_images.shuffle(seed=42).select(range(images_per_class)) # type: ignore
 
             def transform_batch(batch):
@@ -144,6 +149,9 @@ def run(force: bool = False) -> None:
 
             gen_images_list = {pair: [] for pair in pairs}
 
+            metric = KernelInceptionDistance(subset_size=images_per_class)
+            metric.update(real_images, real=True)
+
             for idx in tqdm(range(images_per_class), desc=eval_key, leave=False):
                 pair_outputs = two_picard_trajectory_grid(
                     base_model,
@@ -158,18 +166,16 @@ def run(force: bool = False) -> None:
 
                 for pair in pairs:
                     decoded_image = vae.decode(pair_outputs[pair] / 0.18215).sample
-                    gen_images_list[pair].append(decoded_image.squeeze(0).cpu())
-                    save_decoded_image(
+                    int8_image = save_decoded_image(
                         SPEC_NAME,
                         f"{eval_key}_draft_{pair[0]}_base_{pair[1]}",
                         idx,
                         decoded_image,
                     )
+                    gen_images_list[pair].append(int8_image)
 
             pair_stats = []
             for pair in pairs:
-                metric = KernelInceptionDistance(subset_size=min(50, images_per_class))
-                metric.update(real_images, real=True)
                 metric.update(torch.stack(gen_images_list[pair], dim=0), real=False)
                 kid_score = float(metric.compute()[0])
                 pair_stats.append(
@@ -190,4 +196,5 @@ def run(force: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    run()
+    with torch.no_grad():
+        run()
