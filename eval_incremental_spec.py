@@ -14,7 +14,6 @@ from tqdm import tqdm
 
 from eval_common import (
     CFG_SCALE,
-    NUM_IMAGES,
     OUTPUTS_DIR,
     get_available_models,
     load_model,
@@ -23,6 +22,8 @@ from eval_common import (
     save_results,
 )
 from inference import piecewise_picard_trajectory, upscaling_piecewise_picard
+
+NUM_IMAGES = 32
 
 SPEC_NAME = "incremental_spec"
 PLOTS_DIR = OUTPUTS_DIR / "plots"
