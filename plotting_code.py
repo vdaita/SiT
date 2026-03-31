@@ -1,616 +1,430 @@
-"""
-plot_results.py
-===============
-Reads from:
-  outputs/results_baseline.json
-  outputs/results_two_picard.json
-  outputs/results_speculative.json
+from __future__ import annotations
 
-Produces in outputs/plots/:
-  01_baseline_iters.png
-  01_baseline_wallclock.png
-  02_twopic_iters_tau{tau}.png
-  02_twopic_wallclock_tau{tau}.png
-  03_spec_acceptance_tau{tau}_K{K}.png
-  04_spec_wallclock_tau{tau}_K{K}.png
-  05_residual_heatmap_{pair}_{overlap_str}.png
-"""
+import math
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
 
-import json
-import os
-import numpy as np
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
-RESULTS_FILES = {
-    "baseline":    "outputs/results_baseline.json",
-    "two_picard":  "outputs/results_two_picard.json",
-    "speculative": "outputs/results_speculative.json",
-}
-PLOTS_DIR   = "outputs/plots"
+from eval_common import OUTPUTS_DIR, load_results
+
+PLOTS_DIR = OUTPUTS_DIR / "plots"
 MODEL_ORDER = ["S", "B", "L", "XL"]
+MODEL_WEIGHTS = {
+    "S": 1,
+    "B": 4,
+    "L": 8,
+    "XL": 16,
+}
 
-os.makedirs(PLOTS_DIR, exist_ok=True)
+BASELINE_KEY_RE = re.compile(r"baseline_model_(?P<model>\w+)_num_steps_(?P<num_steps>\d+)")
+SPEC_KEY_RE = re.compile(
+    r"speculative_draft_(?P<draft>\w+)_base_(?P<base>\w+)"
+    r"_steps_(?P<num_steps>\d+)_threshold_(?P<threshold>[0-9.]+)"
+    r"_draft_k_(?P<spec_k>\d+)_(?P<mode>overlap|sequential)"
+)
+TWO_PICARD_KEY_RE = re.compile(
+    r"two_picard_draft_(?P<draft>\w+)_base_(?P<base>\w+)"
+    r"_steps_(?P<num_steps>\d+)_threshold_(?P<threshold>[0-9.]+)"
+    r"_draft_init_(?P<draft_init>\d+)"
+)
+GRID_KEY_RE = re.compile(
+    r"two_picard_grid_draft_(?P<draft>\w+)_base_(?P<base>\w+)"
+    r"_steps_(?P<num_steps>\d+)_class_(?P<class_idx>\d+)"
+)
 
-def load(kind):
-    p = RESULTS_FILES[kind]
-    if not os.path.exists(p):
-        print(f"  [warn] {p} not found, skipping.")
-        return {}
-    with open(p) as f:
-        return json.load(f)
 
-def ms(vals):
-    a = np.array([v for v in vals if v is not None], dtype=float)
-    if len(a) == 0:
-        return np.nan, 0.0
-    return float(np.mean(a)), float(np.std(a))
+@dataclass(frozen=True)
+class BaselineConfig:
+    model: str
+    num_steps: int
+    threshold: float
 
-def sorted_unique(keys, extract, cast=str):
-    return sorted(set(cast(extract(k)) for k in keys))
 
-baseline    = load("baseline")
-two_picard  = load("two_picard")
-speculative = load("speculative")
+@dataclass(frozen=True)
+class SpeculativeConfig:
+    draft: str
+    base: str
+    num_steps: int
+    threshold: float
+    spec_k: int
+    overlap: bool
 
-# Discover axes from actual keys present in each file
-def baseline_models():
-    return sorted(set(k.split("_")[0] for k in baseline),
-                  key=lambda m: MODEL_ORDER.index(m) if m in MODEL_ORDER else 99)
 
-def baseline_steps():
-    return sorted(set(int(k.split("_steps")[1].split("_")[0]) for k in baseline))
+@dataclass(frozen=True)
+class TwoPicardConfig:
+    draft: str
+    base: str
+    num_steps: int
+    threshold: float
+    draft_init: int
 
-def baseline_taus():
-    return sorted(set(float(k.split("_tau")[1]) for k in baseline))
 
-def twopic_pairs():
-    return sorted(set(k.split("_steps")[0] for k in two_picard))
+@dataclass(frozen=True)
+class GridPoint:
+    draft: str
+    base: str
+    num_steps: int
+    draft_iters: int
+    base_iters: int
+    kid: float
 
-def twopic_steps():
-    return sorted(set(int(k.split("_steps")[1].split("_")[0]) for k in two_picard))
+    @property
+    def pair_label(self) -> str:
+        return f"{self.draft} -> {self.base}"
 
-def twopic_taus():
-    return sorted(set(float(k.split("_tau")[1].split("_")[0]) for k in two_picard))
+    @property
+    def config_label(self) -> str:
+        return f"{self.draft} -> {self.base} ({self.draft_iters}, {self.base_iters})"
 
-def twopic_dinits():
-    return sorted(set(int(k.split("_dinit")[1]) for k in two_picard))
+    @property
+    def weighted_iters(self) -> float:
+        return (
+            MODEL_WEIGHTS.get(self.draft, 1) * self.draft_iters
+            + MODEL_WEIGHTS.get(self.base, 1) * self.base_iters
+        )
 
-def spec_pairs():
-    # key format: {draft}to{base}_steps{N}_tau{tau}_K{K}_{overlap_str}
-    return sorted(set(k.split("_steps")[0] for k in speculative))
 
-def spec_steps():
-    return sorted(set(int(k.split("_steps")[1].split("_")[0]) for k in speculative))
+def sort_models(models: Iterable[str]) -> list[str]:
+    return sorted(models, key=lambda model: MODEL_ORDER.index(model) if model in MODEL_ORDER else len(MODEL_ORDER))
 
-def spec_taus():
-    return sorted(set(float(k.split("_tau")[1].split("_")[0]) for k in speculative))
 
-def spec_Ks():
-    return sorted(set(int(k.split("_K")[1].split("_")[0]) for k in speculative))
+def metric_mean_std(records: list[dict[str, Any]], field: str) -> tuple[float, float]:
+    values = np.array([record[field] for record in records if record.get(field) is not None], dtype=float)
+    if values.size == 0:
+        return float("nan"), float("nan")
+    return float(np.mean(values)), float(np.std(values))
 
-# ------------------------------------------------------------------ #
-# Fig 1: Baseline iters + wall-clock
-# ------------------------------------------------------------------ #
-if baseline:
-    models   = baseline_models()
-    steps_l  = baseline_steps()
-    taus_l   = baseline_taus()
 
-    for metric, label, color, fname in [
-        ("iters",        "Picard iters",   "steelblue",  "01_baseline_iters.png"),
-        ("wall_clock_s", "Wall-clock (s)", "darkorange", "01_baseline_wallclock.png"),
-    ]:
+def parse_baseline_results(raw: dict[str, list[dict[str, Any]]]) -> dict[BaselineConfig, list[dict[str, Any]]]:
+    parsed: dict[BaselineConfig, list[dict[str, Any]]] = {}
+    for key, records in raw.items():
+        if not records:
+            continue
+        match = BASELINE_KEY_RE.fullmatch(key)
+        if not match:
+            continue
+        model = records[0].get("model", match.group("model"))
+        num_steps = int(records[0].get("num_steps", match.group("num_steps")))
+        by_threshold: dict[float, list[dict[str, Any]]] = {}
+        for record in records:
+            threshold = float(record["threshold"])
+            by_threshold.setdefault(threshold, []).append(record)
+        for threshold, threshold_records in by_threshold.items():
+            parsed[BaselineConfig(model=model, num_steps=num_steps, threshold=threshold)] = threshold_records
+    return parsed
+
+
+def parse_speculative_results(raw: dict[str, list[dict[str, Any]]]) -> dict[SpeculativeConfig, list[dict[str, Any]]]:
+    parsed: dict[SpeculativeConfig, list[dict[str, Any]]] = {}
+    for key, records in raw.items():
+        match = SPEC_KEY_RE.fullmatch(key)
+        if not match:
+            continue
+        sample = records[0] if records else {}
+        cfg = SpeculativeConfig(
+            draft=sample.get("draft_model", match.group("draft")),
+            base=sample.get("base_model", match.group("base")),
+            num_steps=int(sample.get("num_steps", match.group("num_steps"))),
+            threshold=float(sample.get("threshold", match.group("threshold"))),
+            spec_k=int(sample.get("spec_k", match.group("spec_k"))),
+            overlap=bool(sample.get("overlap", match.group("mode") == "overlap")),
+        )
+        parsed[cfg] = records
+    return parsed
+
+
+def parse_two_picard_results(raw: dict[str, list[dict[str, Any]]]) -> dict[TwoPicardConfig, list[dict[str, Any]]]:
+    parsed: dict[TwoPicardConfig, list[dict[str, Any]]] = {}
+    for key, records in raw.items():
+        match = TWO_PICARD_KEY_RE.fullmatch(key)
+        if not match:
+            continue
+        sample = records[0] if records else {}
+        cfg = TwoPicardConfig(
+            draft=sample.get("draft_model", match.group("draft")),
+            base=sample.get("base_model", match.group("base")),
+            num_steps=int(sample.get("num_steps", match.group("num_steps"))),
+            threshold=float(sample.get("threshold", match.group("threshold"))),
+            draft_init=int(sample.get("draft_init", match.group("draft_init"))),
+        )
+        parsed[cfg] = records
+    return parsed
+
+
+def parse_grid_results(raw: dict[str, list[dict[str, Any]]]) -> list[GridPoint]:
+    grouped: dict[tuple[str, str, int, int, int], list[float]] = {}
+    for key, records in raw.items():
+        match = GRID_KEY_RE.fullmatch(key)
+        if not match:
+            continue
+        for record in records:
+            draft = record.get("draft_model", match.group("draft"))
+            base = record.get("base_model", match.group("base"))
+            num_steps = int(record.get("num_steps", match.group("num_steps")))
+            point_key = (draft, base, num_steps, int(record["draft_iters"]), int(record["base_iters"]))
+            grouped.setdefault(point_key, []).append(float(record["kid"]))
+
+    return [
+        GridPoint(
+            draft=draft,
+            base=base,
+            num_steps=num_steps,
+            draft_iters=draft_iters,
+            base_iters=base_iters,
+            kid=float(np.mean(kids)),
+        )
+        for (draft, base, num_steps, draft_iters, base_iters), kids in grouped.items()
+    ]
+
+
+def ensure_plot_dir() -> None:
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def save_figure(fig: plt.Figure, filename: str) -> None:
+    ensure_plot_dir()
+    path = PLOTS_DIR / filename
+    fig.tight_layout()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {path}")
+
+
+def plot_two_picard_wallclock(
+    baseline: dict[BaselineConfig, list[dict[str, Any]]],
+    two_picard: dict[TwoPicardConfig, list[dict[str, Any]]],
+) -> None:
+    thresholds = sorted({cfg.threshold for cfg in two_picard})
+    pairs = sorted({(cfg.draft, cfg.base) for cfg in two_picard}, key=lambda pair: tuple(sort_models(pair)))
+    steps = sorted({cfg.num_steps for cfg in two_picard})
+
+    for threshold in thresholds:
         fig, axes = plt.subplots(
-            len(steps_l), len(taus_l),
-            figsize=(4 * len(taus_l), 3.5 * len(steps_l)),
+            len(steps),
+            len(pairs),
+            figsize=(5 * max(len(pairs), 1), 4 * max(len(steps), 1)),
             squeeze=False,
         )
-        fig.suptitle(f"Baseline: {label}", fontsize=13, fontweight="bold")
+        fig.suptitle(f"Two-Picard wall clock vs baseline (threshold={threshold})", fontsize=13, fontweight="bold")
 
-        for row, num_steps in enumerate(steps_l):
-            for col, tau in enumerate(taus_l):
+        for row, num_steps in enumerate(steps):
+            for col, (draft, base) in enumerate(pairs):
                 ax = axes[row][col]
-                means, stds = [], []
-                for m in models:
-                    key = f"{m}_steps{num_steps}_tau{tau}"
-                    if key not in baseline:
-                        means.append(np.nan); stds.append(0.0); continue
-                    mv, sv = ms([r[metric] for r in baseline[key]])
-                    means.append(mv); stds.append(sv)
+                baseline_cfg = BaselineConfig(model=base, num_steps=num_steps, threshold=threshold)
+                baseline_records = baseline.get(baseline_cfg)
+                if not baseline_records:
+                    ax.set_visible(False)
+                    continue
 
-                xs = np.arange(len(models))
-                ax.bar(xs, means, yerr=stds, color=color, capsize=4)
-                ax.set_xticks(xs); ax.set_xticklabels(models, fontsize=8)
-                ax.set_title(f"steps={num_steps}  τ={tau}", fontsize=8)
-                if col == 0:
-                    ax.set_ylabel(label, fontsize=8)
+                base_by_idx = {record["img_idx"]: record["wall_clock_s"] for record in baseline_records}
+                configs = sorted(
+                    [cfg for cfg in two_picard if cfg.draft == draft and cfg.base == base and cfg.num_steps == num_steps and cfg.threshold == threshold],
+                    key=lambda cfg: cfg.draft_init,
+                )
+                box_data: list[list[float]] = []
+                labels: list[str] = []
+                medians: list[float] = []
 
-        plt.tight_layout()
-        path = f"{PLOTS_DIR}/{fname}"
-        plt.savefig(path, dpi=150); plt.close()
-        print(f"Saved {path}")
-
-# ------------------------------------------------------------------ #
-# Fig 2a: Two-picard stacked iters, one figure per tau
-# ------------------------------------------------------------------ #
-if two_picard:
-    pairs_l  = twopic_pairs()
-    steps_l  = twopic_steps()
-    taus_l   = twopic_taus()
-    dinits_l = twopic_dinits()
-
-    for tau in taus_l:
-        n_pairs = len(pairs_l)
-        n_steps = len(steps_l)
-        if not n_pairs:
-            continue
-        fig, axes = plt.subplots(n_steps, n_pairs,
-                                 figsize=(5 * n_pairs, 4 * n_steps),
-                                 squeeze=False)
-        fig.suptitle(f"Two-picard: iters breakdown  tau={tau}",
-                     fontsize=12, fontweight="bold")
-
-        for row, num_steps in enumerate(steps_l):
-            for col, pair in enumerate(pairs_l):
-                ax = axes[row][col]
-                base_name = pair.split("to")[1]
-
-                # --- column 0: baseline solo picard iters ---
-                bkey       = f"{base_name}_steps{num_steps}_tau{tau}"
-                base_total = int(round(np.mean([r["iters"] for r in baseline[bkey]])))                              if bkey in baseline else 0
-
-                # --- columns 1+: two-picard at each valid dinit ---
-                valid_dinits = [n for n in dinits_l if n <= num_steps]
-                all_labels   = ["baseline"] + [str(n) for n in valid_dinits]
-
-                # Baseline bar: no draft, all base
-                all_d = [0]
-                all_b = [base_total]
-
-                for n in valid_dinits:
-                    key = f"{pair}_steps{num_steps}_tau{tau}_dinit{n}"
-                    if key not in two_picard:
-                        all_d.append(0); all_b.append(0); continue
-                    all_d.append(int(round(np.mean([r["draft_iters"] for r in two_picard[key]]))))
-                    all_b.append(int(round(np.mean([r["base_iters"]  for r in two_picard[key]]))))
-
-                xs = np.arange(len(all_labels))
-                ax.bar(xs, all_d, label="Draft", color="steelblue")
-                ax.bar(xs, all_b, bottom=all_d, label="Base", color="darkorange")
-                ax.set_xticks(xs)
-                ax.set_xticklabels(all_labels, fontsize=8)
-                ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
-                ax.set_xlabel("Max draft iters")
-                if col == 0:
-                    ax.set_ylabel(f"steps={num_steps}\nPicard iters", fontsize=9)
-                ax.set_title(pair.replace("to", " -> "), fontsize=9)
-                if row == 0 and col == 0:
-                    ax.legend(fontsize=7)
-
-        plt.tight_layout()
-        path = f"{PLOTS_DIR}/02_twopic_iters_tau{tau}.png"
-        plt.savefig(path, dpi=150); plt.close()
-        print(f"Saved {path}")
-
-# ------------------------------------------------------------------ #
-# Fig 2b: Two-picard wall-clock ratio vs baseline — per-example boxplot
-# y-axis: wall_clock(two_picard) / wall_clock(baseline) as % per image
-# x-axis: only dinit values <= num_steps for that row
-# ------------------------------------------------------------------ #
-if two_picard and baseline:
-    for tau in twopic_taus():
-        pairs_l  = twopic_pairs()
-        steps_l  = twopic_steps()
-        dinits_l = twopic_dinits()
-        if not pairs_l:
-            continue
-
-        fig, axes = plt.subplots(len(steps_l), len(pairs_l),
-                                 figsize=(5 * len(pairs_l), 4 * len(steps_l)),
-                                 squeeze=False)
-        fig.suptitle(f"Two-picard wall-clock % of baseline  tau={tau}",
-                     fontsize=12, fontweight="bold")
-
-        for row, num_steps in enumerate(steps_l):
-            for col, pair in enumerate(pairs_l):
-                ax = axes[row][col]
-                base_name = pair.split("to")[1]
-                bkey      = f"{base_name}_steps{num_steps}_tau{tau}"
-
-                if bkey not in baseline:
-                    ax.set_visible(False); continue
-
-                base_by_idx = {r["img_idx"]: r["wall_clock_s"]
-                               for r in baseline[bkey]}
-
-                # only dinit values that are <= num_steps
-                valid_dinits = [n for n in dinits_l if n <= num_steps]
-                if not valid_dinits:
-                    ax.set_visible(False); continue
-
-                box_data, labels = [], []
-                for n in valid_dinits:
-                    key = f"{pair}_steps{num_steps}_tau{tau}_dinit{n}"
-                    if key not in two_picard:
+                for cfg in configs:
+                    ratios = [
+                        100.0 * record["wall_clock_s"] / base_by_idx[record["img_idx"]]
+                        for record in two_picard[cfg]
+                        if record["img_idx"] in base_by_idx and base_by_idx[record["img_idx"]] > 0
+                    ]
+                    if not ratios:
                         continue
-                    ratios = []
-                    for r in two_picard[key]:
-                        base_w = base_by_idx.get(r["img_idx"])
-                        if base_w and base_w > 0:
-                            ratios.append(100.0 * r["wall_clock_s"] / base_w)
-                    if ratios:
-                        box_data.append(ratios)
-                        labels.append(str(n))
+                    box_data.append(ratios)
+                    labels.append(str(cfg.draft_init))
+                    medians.append(float(np.median(ratios)))
 
                 if not box_data:
-                    ax.set_visible(False); continue
+                    ax.set_visible(False)
+                    continue
 
-                bp = ax.boxplot(box_data, patch_artist=True,
-                                medianprops=dict(color="black", linewidth=1.5))
-                for patch in bp["boxes"]:
-                    patch.set_facecolor("steelblue")
-                    patch.set_alpha(0.6)
+                boxplot = ax.boxplot(
+                    box_data,
+                    patch_artist=True,
+                    medianprops={"color": "black", "linewidth": 1.4},
+                )
+                for patch in boxplot["boxes"]:
+                    patch.set_facecolor("#4C78A8")
+                    patch.set_alpha(0.65)
 
-                ax.axhline(100, color="red", linestyle="--", linewidth=1,
-                           label="Baseline (100%)")
+                ax.plot(range(1, len(medians) + 1), medians, color="#1F3552", linewidth=1.2, marker="o", markersize=3)
+                ax.axhline(100, color="#E45756", linestyle="--", linewidth=1.0)
                 ax.set_xticks(range(1, len(labels) + 1))
                 ax.set_xticklabels(labels, fontsize=8)
-                ax.set_xlabel("Max draft iters")
+                ax.set_title(f"{draft} -> {base}", fontsize=10)
+                ax.set_xlabel("Draft init iters", fontsize=9)
                 if col == 0:
-                    ax.set_ylabel(f"steps={num_steps}\n% of baseline wall-clock",
-                                  fontsize=8)
-                ax.set_title(pair.replace("to", " -> "), fontsize=9)
-                if row == 0 and col == 0:
-                    ax.legend(fontsize=7)
+                    ax.set_ylabel(f"steps={num_steps}\n% of baseline wall-clock", fontsize=9)
 
-        plt.tight_layout()
-        path = f"{PLOTS_DIR}/02_twopic_wallclock_tau{tau}.png"
-        plt.savefig(path, dpi=150); plt.close()
-        print(f"Saved {path}")
+        save_figure(fig, f"02_twopic_wallclock_threshold_{threshold}.png")
 
-# ------------------------------------------------------------------ #
-# Fig 3: Speculative acceptance rate — overlap vs sequential
-# ------------------------------------------------------------------ #
-if speculative:
-    for tau in spec_taus():
-        for K in spec_Ks():
-            pairs_l = spec_pairs()
-            steps_l = spec_steps()
-            if not pairs_l:
-                continue
 
-            fig, axes = plt.subplots(2, len(pairs_l),
-                                     figsize=(5 * len(pairs_l), 7),
-                                     squeeze=False)
-            fig.suptitle(f"Acceptance rate  τ={tau}  K={K}",
-                         fontsize=12, fontweight="bold")
+def acceptance_series(record: dict[str, Any]) -> list[float]:
+    if "acceptance_history" in record:
+        return [float(value) for value in record["acceptance_history"]]
+    history = record.get("best_draft_indices_history", [])
+    return [float(any(candidate_idx > 0 for candidate_idx in step)) for step in history]
 
-            for col, pair in enumerate(pairs_l):
-                for row, (overlap_str, color) in enumerate([
-                    ("overlap",    "steelblue"),
-                    ("sequential", "darkorange"),
-                ]):
+
+def plot_speculative_acceptance(speculative: dict[SpeculativeConfig, list[dict[str, Any]]]) -> None:
+    thresholds = sorted({cfg.threshold for cfg in speculative})
+    spec_ks = sorted({cfg.spec_k for cfg in speculative})
+    pairs = sorted({(cfg.draft, cfg.base) for cfg in speculative}, key=lambda pair: tuple(sort_models(pair)))
+    steps = sorted({cfg.num_steps for cfg in speculative})
+
+    for threshold in thresholds:
+        for spec_k in spec_ks:
+            fig, axes = plt.subplots(2, len(pairs), figsize=(5 * max(len(pairs), 1), 8), squeeze=False)
+            fig.suptitle(f"Speculative acceptance (threshold={threshold}, K={spec_k})", fontsize=13, fontweight="bold")
+
+            for col, (draft, base) in enumerate(pairs):
+                for row, overlap in enumerate([True, False]):
                     ax = axes[row][col]
-                    plotted_any = False
+                    plotted = False
 
-                    for num_steps, ls in zip(steps_l, ["-", "--", ":", "-."]):
-                        key = f"{pair}_steps{num_steps}_tau{tau}_K{K}_{overlap_str}"
-                        if key not in speculative:
+                    for line_style, num_steps in zip(["-", "--", ":", "-."], steps):
+                        cfg = SpeculativeConfig(
+                            draft=draft,
+                            base=base,
+                            num_steps=num_steps,
+                            threshold=threshold,
+                            spec_k=spec_k,
+                            overlap=overlap,
+                        )
+                        records = speculative.get(cfg)
+                        if not records:
                             continue
-                        all_acc = [r["acceptance_history"] for r in speculative[key]]
-                        max_len = max(len(a) for a in all_acc)
-                        padded  = np.full((len(all_acc), max_len), np.nan)
-                        for i, a in enumerate(all_acc):
-                            arr = np.array(a, dtype=float)
-                            padded[i, :len(arr)] = (arr > 0).astype(float)
-                        mean_acc = np.nanmean(padded, axis=0)
-                        std_acc  = np.nanstd(padded, axis=0)
-                        iters    = np.arange(1, max_len + 1)
-                        overall  = float(np.nanmean(mean_acc))
-                        ax.plot(iters, mean_acc, color=color, linestyle=ls,
-                                linewidth=1.5,
-                                label=f"steps={num_steps} (μ={overall:.2f})")
-                        ax.fill_between(iters,
-                                        np.clip(mean_acc - std_acc, 0, 1),
-                                        np.clip(mean_acc + std_acc, 0, 1),
-                                        alpha=0.1, color=color)
-                        plotted_any = True
 
-                    ax.set_ylim(0, 1.05)
+                        series = [acceptance_series(record) for record in records]
+                        max_len = max(len(item) for item in series)
+                        padded = np.full((len(series), max_len), np.nan)
+                        for idx, item in enumerate(series):
+                            padded[idx, : len(item)] = np.array(item, dtype=float)
+
+                        means = np.nanmean(padded, axis=0)
+                        stds = np.nanstd(padded, axis=0)
+                        xs = np.arange(1, max_len + 1)
+                        label = f"steps={num_steps} (mean={float(np.nanmean(means)):.2f})"
+                        color = "#4C78A8" if overlap else "#F58518"
+                        ax.plot(xs, means, linestyle=line_style, color=color, linewidth=1.8, label=label)
+                        ax.fill_between(xs, np.clip(means - stds, 0, 1), np.clip(means + stds, 0, 1), color=color, alpha=0.12)
+                        plotted = True
+
+                    ax.set_ylim(0.0, 1.05)
+                    ax.set_title(f"{draft} -> {base} [{'overlap' if overlap else 'sequential'}]", fontsize=10)
+                    ax.set_xlabel("Outer iteration", fontsize=9)
+                    if col == 0:
+                        ax.set_ylabel("Acceptance rate", fontsize=9)
                     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
-                    ax.set_xlabel("Picard iteration")
-                    if col == 0:
-                        ax.set_ylabel("Acceptance rate")
-                    ax.set_title(f"{pair.replace('to', ' → ')}  [{overlap_str}]",
-                                 fontsize=9)
-                    if plotted_any:
-                        ax.legend(fontsize=6)
-
-            plt.tight_layout()
-            path = f"{PLOTS_DIR}/03_spec_acceptance_tau{tau}_K{K}.png"
-            plt.savefig(path, dpi=150); plt.close()
-            print(f"Saved {path}")
-
-# ------------------------------------------------------------------ #
-# Fig 4: Speculative wall-clock: baseline vs overlap vs sequential
-# ------------------------------------------------------------------ #
-if speculative and baseline:
-    for tau in spec_taus():
-        for K in spec_Ks():
-            pairs_l = spec_pairs()
-            steps_l = spec_steps()
-            if not pairs_l:
-                continue
-
-            fig, axes = plt.subplots(len(steps_l), len(pairs_l),
-                                     figsize=(5 * len(pairs_l), 4 * len(steps_l)),
-                                     squeeze=False)
-            fig.suptitle(f"Speculative wall-clock  τ={tau}  K={K}",
-                         fontsize=12, fontweight="bold")
-
-            for row, num_steps in enumerate(steps_l):
-                for col, pair in enumerate(pairs_l):
-                    ax = axes[row][col]
-                    base_name = pair.split("to")[1]
-
-                    candidates = [
-                        (f"{base_name}_steps{num_steps}_tau{tau}",
-                         "Baseline", "gray", baseline),
-                        (f"{pair}_steps{num_steps}_tau{tau}_K{K}_overlap",
-                         "Overlap", "steelblue", speculative),
-                        (f"{pair}_steps{num_steps}_tau{tau}_K{K}_sequential",
-                         "Sequential", "darkorange", speculative),
-                    ]
-
-                    bars, labels, colors = [], [], []
-                    for key, lbl, clr, src in candidates:
-                        if key in src:
-                            m, s = ms([r["wall_clock_s"] for r in src[key]])
-                            bars.append((m, s))
-                            labels.append(lbl)
-                            colors.append(clr)
-
-                    if not bars:
-                        ax.set_visible(False); continue
-
-                    xs = np.arange(len(bars))
-                    ax.bar(xs, [b[0] for b in bars],
-                           yerr=[b[1] for b in bars],
-                           color=colors, capsize=5)
-                    ax.set_xticks(xs)
-                    ax.set_xticklabels(labels, fontsize=8)
-                    if col == 0:
-                        ax.set_ylabel(f"steps={num_steps}\nWall-clock (s)", fontsize=8)
-                    ax.set_title(pair.replace("to", " → "), fontsize=9)
-
-            plt.tight_layout()
-            path = f"{PLOTS_DIR}/04_spec_wallclock_tau{tau}_K{K}.png"
-            plt.savefig(path, dpi=150); plt.close()
-            print(f"Saved {path}")
-
-# ------------------------------------------------------------------ #
-# Fig 4b: Sequential-evaluation-depth comparison
-#
-# "Sequential depth" = total base-model-equivalent compute that must
-# complete serially before you have the final image.
-#
-# Baseline Picard:
-#   depth = N_iters  (each is one base forward pass)
-#
-# Sequential speculative:
-#   each outer iteration runs K draft steps then 1 base step in series
-#   draft cost in base-equiv units = K * (draft_wall / base_wall)
-#   depth = sum over iters of (K_draft_used * ratio + 1)
-#   — but we only know total iters, not per-iter draft usage, so we
-#   approximate: accepted draft steps ≈ acceptance_rate * K * N_iters
-#   depth_seq = N_iters + accepted_drafts * ratio
-#
-# Overlap speculative:
-#   base and draft run in parallel each round.
-#   serial cost per round = max(1, K * ratio)  [base-equiv units]
-#   since draft << base, K*ratio < 1 for most pairs → cost ≈ 1 per round
-#   depth_overlap = N_iters * max(1.0, K * ratio)
-#
-# Wall-clock ratio estimated from baseline results:
-#   ratio = mean_wall_per_iter(draft) / mean_wall_per_iter(base)
-#   using matching num_steps and tau where available, else nearest.
-# ------------------------------------------------------------------ #
-if speculative and baseline:
-
-    def base_wall_per_iter(model_name, num_steps, tau):
-        """Mean wall-clock per Picard iteration for a single model run."""
-        key = f"{model_name}_steps{num_steps}_tau{tau}"
-        if key not in baseline:
-            return None
-        records = baseline[key]
-        walls = [r["wall_clock_s"] for r in records]
-        iters = [r["iters"] for r in records]
-        if not walls or not iters or np.mean(iters) == 0:
-            return None
-        return float(np.mean(walls) / np.mean(iters))
-
-    def find_ratio(draft_name, base_name, num_steps, tau):
-        """draft forward-pass time / base forward-pass time."""
-        d = base_wall_per_iter(draft_name, num_steps, tau)
-        b = base_wall_per_iter(base_name,  num_steps, tau)
-        if d is None or b is None or b == 0:
-            return None
-        return d / b
-
-    for tau in spec_taus():
-        for K in spec_Ks():
-            pairs_l = spec_pairs()
-            steps_l = spec_steps()
-            if not pairs_l:
-                continue
-
-            fig, axes = plt.subplots(len(steps_l), len(pairs_l),
-                                     figsize=(5 * len(pairs_l), 4 * len(steps_l)),
-                                     squeeze=False)
-            fig.suptitle(
-                f"Depth ratio vs baseline Picard  tau={tau}  K={K}\n"
-                f"Sequential: (N_outer*(K*r+1)) / mean_baseline_iters  |  "
-                f"Overlap: N_outer / mean_baseline_iters  |  r=draft/base fwd-pass time",
-                fontsize=9, fontweight="bold")
-
-            for row, num_steps in enumerate(steps_l):
-                for col, pair in enumerate(pairs_l):
-                    ax = axes[row][col]
-                    base_name  = pair.split("to")[1]
-                    draft_name = pair.split("to")[0]
-
-                    ratio = find_ratio(draft_name, base_name, num_steps, tau)
-
-                    # ---- Baseline: raw Picard iters (integers) ----
-                    bkey = f"{base_name}_steps{num_steps}_tau{tau}"
-                    if bkey not in baseline:
-                        ax.set_visible(False); continue
-                    base_iters = [int(r["iters"]) for r in baseline[bkey]]
-
-                    # ---- Sequential depth ----
-                    # Each outer iter: K draft calls then 1 base call, fully serial.
-                    # depth = N_outer * (K*r + 1), where r = draft_time / base_time.
-                    # We show depth as a ratio vs baseline: depth / mean(base_iters).
-                    # r is shown in the label so the reader can sanity-check.
-                    skey = f"{pair}_steps{num_steps}_tau{tau}_K{K}_sequential"
-                    seq_ratios = []
-                    if skey in speculative and ratio is not None:
-                        cost_seq = K * ratio + 1.0
-                        mean_base = float(np.mean(base_iters))
-                        for r in speculative[skey]:
-                            seq_depth = r["iters"] * cost_seq
-                            seq_ratios.append(seq_depth / mean_base if mean_base > 0 else np.nan)
-
-                    # ---- Overlap: just raw outer iters vs baseline iters ----
-                    # Base and draft run in parallel; wall time per round ≈ base time
-                    # (draft is always cheaper). So outer iters IS the depth in base units.
-                    # Compare directly as a ratio vs baseline iters.
-                    okey = f"{pair}_steps{num_steps}_tau{tau}_K{K}_overlap"
-                    ovl_ratios = []
-                    if okey in speculative:
-                        mean_base = float(np.mean(base_iters))
-                        for r in speculative[okey]:
-                            ovl_ratios.append(r["iters"] / mean_base if mean_base > 0 else np.nan)
-
-                    # ---- Plot: side-by-side boxplots of depth ratio ----
-                    box_data, labels, colors = [], [], []
-                    # Baseline always = ratio 1.0 (show as reference line, not a box)
-                    if seq_ratios:
-                        r_str = f"r={ratio:.2f}" if ratio is not None else "r=?"
-                        box_data.append(seq_ratios)
-                        labels.append(f"Sequential\ndepth ratio\n({r_str}, K={K})")
-                        colors.append("darkorange")
-                    if ovl_ratios:
-                        box_data.append(ovl_ratios)
-                        labels.append(f"Overlap\niter ratio\n(raw iters / baseline)")
-                        colors.append("steelblue")
-
-                    if not box_data:
-                        ax.set_visible(False); continue
-
-                    bp = ax.boxplot(box_data, patch_artist=True,
-                                    medianprops=dict(color="black", linewidth=1.5))
-                    for patch, clr in zip(bp["boxes"], colors):
-                        patch.set_facecolor(clr); patch.set_alpha(0.6)
-
-                    # Reference line at 1.0 = same cost as baseline
-                    ax.axhline(1.0, color="red", linestyle="--", linewidth=1,
-                               label="Baseline (1.0)")
-                    ax.set_xticks(range(1, len(labels) + 1))
-                    ax.set_xticklabels(labels, fontsize=7)
-                    if col == 0:
-                        ax.set_ylabel(f"steps={num_steps}\nRatio vs baseline", fontsize=8)
-                    ax.set_title(pair.replace("to", " -> "), fontsize=9)
-                    if col == 0 and row == 0:
+                    if plotted:
                         ax.legend(fontsize=7)
 
-            plt.tight_layout()
-            path = f"{PLOTS_DIR}/04b_seq_depth_tau{tau}_K{K}.png"
-            plt.savefig(path, dpi=150); plt.close()
-            print(f"Saved {path}")
+            save_figure(fig, f"03_spec_acceptance_threshold_{threshold}_K{spec_k}.png")
 
-# ------------------------------------------------------------------ #
-# Fig 5: Residual heatmap — one per pair x overlap_str
-#         Uses the highest num_steps available for each pair
-# ------------------------------------------------------------------ #
-if speculative:
-    for pair in spec_pairs():
-        # find the largest K and most common tau for this pair
-        pair_keys = [k for k in speculative if k.startswith(pair + "_")]
-        if not pair_keys:
-            continue
-        Ks_for_pair   = sorted(set(int(k.split("_K")[1].split("_")[0]) for k in pair_keys))
-        taus_for_pair = sorted(set(float(k.split("_tau")[1].split("_")[0]) for k in pair_keys))
-        steps_for_pair = sorted(set(int(k.split("_steps")[1].split("_")[0]) for k in pair_keys))
 
-        K_repr    = Ks_for_pair[-1]
-        tau_repr  = taus_for_pair[len(taus_for_pair) // 2]   # middle tau
-        step_repr = steps_for_pair[-1]
+def pareto_frontier(points: list[GridPoint]) -> list[GridPoint]:
+    ordered = sorted(points, key=lambda point: (point.weighted_iters, point.kid))
+    frontier: list[GridPoint] = []
+    best_kid = math.inf
+    for point in ordered:
+        if point.kid < best_kid:
+            frontier.append(point)
+            best_kid = point.kid
+    return frontier
 
-        for overlap_str in ["overlap", "sequential"]:
-            key = f"{pair}_steps{step_repr}_tau{tau_repr}_K{K_repr}_{overlap_str}"
-            if key not in speculative:
-                continue
 
-            # Also need the baseline residual at each picard iteration for this
-            # base model / steps / tau, to normalise against.
-            base_name = pair.split("to")[1]
-            bkey      = f"{base_name}_steps{step_repr}_tau{tau_repr}"
+def plot_weighted_iters_vs_kid(grid_points: list[GridPoint]) -> None:
+    if not grid_points:
+        return
 
-            all_grids = [r["draft_residual_grid"] for r in speculative[key]]
-            max_len   = max(len(g) for g in all_grids)
-            n_cands   = K_repr + 1
+    fig, ax = plt.subplots(figsize=(10, 6))
+    pair_labels = sorted({point.pair_label for point in grid_points})
+    colors = {
+        label: color
+        for label, color in zip(
+            pair_labels,
+            ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2", "#B279A2"],
+        )
+    }
 
-            # Mean absolute residual grid: shape (max_len, n_cands)
-            mat    = np.zeros((max_len, n_cands))
-            counts = np.zeros(max_len)
-            for grid in all_grids:
-                for t_idx, row_v in enumerate(grid):
-                    for c_idx in range(min(len(row_v), n_cands)):
-                        mat[t_idx, c_idx] += row_v[c_idx]
-                    counts[t_idx] += 1
-            for t_idx in range(max_len):
-                if counts[t_idx] > 0:
-                    mat[t_idx] /= counts[t_idx]
+    for pair_label in pair_labels:
+        pair_points = [point for point in grid_points if point.pair_label == pair_label]
+        xs = [point.weighted_iters for point in pair_points]
+        ys = [point.kid for point in pair_points]
+        ax.scatter(xs, ys, s=70, alpha=0.85, color=colors[pair_label], label=pair_label, edgecolors="black", linewidths=0.4)
 
-            # Baseline picard: get mean residual per iteration from residual_history.
-            # residual_history is a list of per-step residuals saved at each picard iter.
-            # We use the base-only candidate (col 0) as a proxy if no separate baseline
-            # history is available, falling back to mat[:, 0].
-            base_col = mat[:, 0].copy()   # candidate 0 = base ran alone, no draft
-
-            # Normalise: ratio = candidate_residual / base_residual at same picard iter
-            # ratio < 1  → greener (draft helped, lower residual than base alone)
-            # ratio > 1  → redder  (draft hurt,  higher residual than base alone)
-            # Avoid div-by-zero; clamp display to [0.5, 2.0] so colour is readable
-            base_col_safe = np.where(base_col > 0, base_col, np.nan)
-            ratio_mat = mat / base_col_safe[:, np.newaxis]   # (max_len, n_cands)
-            ratio_mat = np.clip(ratio_mat, 0.5, 2.0)
-
-            # Use a diverging colormap centred at 1.0 (white = same as baseline)
-            import matplotlib.colors as mcolors
-            norm = mcolors.TwoSlopeNorm(vmin=0.5, vcenter=1.0, vmax=2.0)
-
-            fig, ax = plt.subplots(figsize=(8, 3.5))
-            im = ax.imshow(ratio_mat.T, aspect="auto", origin="lower",
-                           cmap="RdYlGn_r", norm=norm, interpolation="nearest")
-            ax.set_xlabel("Picard iteration")
-            ax.set_ylabel("Draft candidate (0 = base only)")
-            ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
-            ax.set_title(
-                f"Residual ratio vs base-only  [{overlap_str}]\n"
-                f"{pair.replace('to', ' -> ')}  steps={step_repr}"
-                f"  K={K_repr}  tau={tau_repr}\n"
-                f"Green = more accurate than base | Red = less accurate"
+        for point in pair_points:
+            ax.annotate(
+                f"({point.draft_iters}, {point.base_iters})",
+                (point.weighted_iters, point.kid),
+                textcoords="offset points",
+                xytext=(5, 5),
+                fontsize=8,
             )
-            cbar = plt.colorbar(im, ax=ax)
-            cbar.set_label("residual / base residual  (1.0 = same as baseline)")
-            cbar.ax.axhline(1.0, color="black", linewidth=1.5, linestyle="--")
-            plt.tight_layout()
-            path = f"{PLOTS_DIR}/05_residual_heatmap_{pair}_{overlap_str}.png"
-            plt.savefig(path, dpi=150); plt.close()
-            print(f"Saved {path}")
 
-print("\nAll plots saved to", PLOTS_DIR)
+    frontier = pareto_frontier(grid_points)
+    ax.plot(
+        [point.weighted_iters for point in frontier],
+        [point.kid for point in frontier],
+        color="black",
+        linewidth=1.8,
+        marker="o",
+        markersize=4,
+        label="Pareto frontier",
+    )
+
+    ax.set_title("Weighted sequential iterations vs KID", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Weighted sequential iterations", fontsize=10)
+    ax.set_ylabel("KID", fontsize=10)
+    ax.grid(alpha=0.25, linestyle=":")
+    ax.legend(fontsize=8)
+
+    weight_caption = ", ".join(f"{model}={weight}" for model, weight in MODEL_WEIGHTS.items())
+    ax.text(
+        0.01,
+        0.01,
+        f"Weights: {weight_caption}",
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=8,
+        bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+    )
+
+    save_figure(fig, "04_weighted_iters_vs_kid.png")
+
+
+def main() -> None:
+    baseline = parse_baseline_results(load_results("baseline"))
+    speculative = parse_speculative_results(load_results("speculative"))
+    two_picard = parse_two_picard_results(load_results("two_picard_time"))
+    grid_points = parse_grid_results(load_results("two_picard_grid"))
+
+    if baseline and two_picard:
+        plot_two_picard_wallclock(baseline, two_picard)
+    else:
+        print("Skipping two-picard wall-clock plot: missing baseline or two_picard_time results.")
+
+    if speculative:
+        plot_speculative_acceptance(speculative)
+    else:
+        print("Skipping speculative acceptance plot: missing speculative results.")
+
+    if grid_points:
+        plot_weighted_iters_vs_kid(grid_points)
+    else:
+        print("Skipping weighted-iterations vs KID plot: missing two_picard_grid results.")
+
+
+if __name__ == "__main__":
+    main()
