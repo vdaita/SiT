@@ -43,6 +43,10 @@ class TwoPicardGridConfig(TypedDict):
 
 @dataclass
 class TwoPicardGridStat:
+    draft_model: str
+    base_model: str
+    num_steps: int
+    class_idx: int
     draft_iters: int
     base_iters: int
     kid: float
@@ -171,6 +175,10 @@ def run(force: bool = False) -> None:
                 pair_stats.append(
                     asdict(
                         TwoPicardGridStat(
+                            draft_model=draft_id,
+                            base_model=base_id,
+                            num_steps=num_steps,
+                            class_idx=class_idx,
                             draft_iters=pair[0],
                             base_iters=pair[1],
                             kid=kid_score,

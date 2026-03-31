@@ -16,6 +16,8 @@ THRESHOLDS = [0.01, 0.05, 0.1]
 @dataclass
 class BaselineStat:
     img_idx: int
+    model: str
+    num_steps: int
     wall_clock_s: float
     iters: int
     residual: List[float]
@@ -48,6 +50,8 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                         asdict(
                             BaselineStat(
                                 img_idx=idx,
+                                model=model_name,
+                                num_steps=num_steps,
                                 wall_clock_s=stats.durations[threshold_idx],
                                 iters=stats.iters[threshold_idx],
                                 residual=stats.residual_history[min(stats.iters[threshold_idx] - 1, len(stats.residual_history) - 1)],

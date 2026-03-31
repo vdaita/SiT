@@ -28,10 +28,17 @@ SPECULATIVE_CONFIGS: List[SpeculativeConfig] = [
 @dataclass
 class SpeculativeStat:
     img_idx: int
+    draft_model: str
+    base_model: str
+    num_steps: int
+    threshold: float
+    spec_k: int
+    overlap: bool
     wall_clock_s: float
     iters: int
     residual_history: list[list[float]]
     best_draft_indices_history: list[list[int]]
+    acceptance_history: list[int]
 
 
 def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
@@ -74,10 +81,17 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                             asdict(
                                 SpeculativeStat(
                                     img_idx=idx,
+                                    draft_model=pair["draft"],
+                                    base_model=pair["base"],
+                                    num_steps=num_steps,
+                                    threshold=threshold,
+                                    spec_k=pair["spec_k"],
+                                    overlap=overlap,
                                     wall_clock_s=time.perf_counter() - t0,
                                     iters=stats.iters,
                                     residual_history=stats.residual_history,
                                     best_draft_indices_history=stats.best_draft_indices_history,
+                                    acceptance_history=[int(any(candidate_idx > 0 for candidate_idx in step)) for step in stats.best_draft_indices_history],
                                 )
                             )
                         )

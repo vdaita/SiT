@@ -7,10 +7,17 @@ from tqdm import tqdm
 
 from eval_common import CFG_SCALE, NUM_IMAGES, get_available_models, load_model, make_eval_batch, result_exists, save_result
 from inference import two_picard_trajectory
+from typing import TypedDict, List
 
 SPEC_NAME = "two_picard_time"
 DRAFT_INIT_SWEEP = [1, 2, 4, 8]
-MODEL_PAIRS = [
+class ModelPair(TypedDict):
+    draft: str
+    base: str
+    num_steps: List[int]
+    thresholds: List[float]
+
+MODEL_PAIRS: List[ModelPair] = [
     {"draft": "S", "base": "B", "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
     {"draft": "S", "base": "L", "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
     {"draft": "B", "base": "L", "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
@@ -20,6 +27,11 @@ MODEL_PAIRS = [
 @dataclass
 class TwoPicardTimingStat:
     img_idx: int
+    draft_model: str
+    base_model: str
+    num_steps: int
+    threshold: float
+    draft_init: int
     wall_clock_s: float
     draft_iters: int
     base_iters: int
@@ -65,6 +77,11 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                             asdict(
                                 TwoPicardTimingStat(
                                     img_idx=idx,
+                                    draft_model=pair["draft"],
+                                    base_model=pair["base"],
+                                    num_steps=num_steps,
+                                    threshold=threshold,
+                                    draft_init=draft_init,
                                     wall_clock_s=time.perf_counter() - t0,
                                     draft_iters=stats.draft_iters,
                                     base_iters=stats.base_iters,
