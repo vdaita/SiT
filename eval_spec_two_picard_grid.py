@@ -51,6 +51,7 @@ class TwoPicardGridStat:
     draft_iters: int
     base_iters: int
     kid: float
+    kid_variance: float
 
 
 image_transform = transforms.Compose(
@@ -66,34 +67,52 @@ two_picard_grid_configs: List[TwoPicardGridConfig] = [
         "draft": "S",
         "base": "B",
         "num_steps": 32,
-        "num_classes": 32,
-        "images_per_class": 1,
+        "num_classes": 16,
+        "images_per_class": 50,
         "pairs": [
+            {"draft_iters": 16, "base_iters": 2},
+            {"draft_iters": 16, "base_iters": 4},
+            {"draft_iters": 16, "base_iters": 8},
+            {"draft_iters": 16, "base_iters": 12},
+            {"draft_iters": 16, "base_iters": 16},
+
             {"draft_iters": 8, "base_iters": 2},
             {"draft_iters": 8, "base_iters": 4},
-            {"draft_iters": 8, "base_iters": 6},
             {"draft_iters": 8, "base_iters": 8},
+            {"draft_iters": 8, "base_iters": 12},
+            {"draft_iters": 8, "base_iters": 16},
+
             {"draft_iters": 4, "base_iters": 2},
             {"draft_iters": 4, "base_iters": 4},
-            {"draft_iters": 4, "base_iters": 6},
             {"draft_iters": 4, "base_iters": 8},
+            {"draft_iters": 4, "base_iters": 12},
+            {"draft_iters": 4, "base_iters": 16},
         ],
     },
     {
         "draft": "S",
         "base": "L",
         "num_steps": 32,
-        "num_classes": 32,
-        "images_per_class": 32,
+        "num_classes": 16,
+        "images_per_class": 50, # max is 100 images because that's how many there are in the test split 
         "pairs": [
+            {"draft_iters": 16, "base_iters": 2},
+            {"draft_iters": 16, "base_iters": 4},
+            {"draft_iters": 16, "base_iters": 8},
+            {"draft_iters": 16, "base_iters": 12},
+            {"draft_iters": 16, "base_iters": 16},
+
             {"draft_iters": 8, "base_iters": 2},
             {"draft_iters": 8, "base_iters": 4},
-            {"draft_iters": 8, "base_iters": 6},
             {"draft_iters": 8, "base_iters": 8},
+            {"draft_iters": 8, "base_iters": 12},
+            {"draft_iters": 8, "base_iters": 16},
+
             {"draft_iters": 4, "base_iters": 2},
             {"draft_iters": 4, "base_iters": 4},
-            {"draft_iters": 4, "base_iters": 6},
             {"draft_iters": 4, "base_iters": 8},
+            {"draft_iters": 4, "base_iters": 12},
+            {"draft_iters": 4, "base_iters": 16},
         ],
     },
 ]
@@ -105,8 +124,12 @@ def run(force: bool = False) -> None:
     vae = get_vae()
 
     label_to_indices = defaultdict(list)
-    for i, label in enumerate(ds["label"]):
+    for i, label in tqdm(enumerate(ds["label"])):
         label_to_indices[label].append(i)
+
+    selected_classes = [1, 32, 64, 128, 256, 512, 590, 780] # arbitrarily select classes
+    for selected_class in selected_classes:
+        print("number of images in selected class: ", selected_class, " = ", len(label_to_indices[selected_class]))
 
     for model_size_pair in tqdm(two_picard_grid_configs, desc="grid model pairs"):
         if model_size_pair["draft"] not in available or model_size_pair["base"] not in available:
@@ -121,7 +144,7 @@ def run(force: bool = False) -> None:
         draft_model = load_model(draft_id)
         pairs = [(pair["draft_iters"], pair["base_iters"]) for pair in model_size_pair["pairs"]]
 
-        for class_idx in tqdm(range(num_classes), desc="grid classes", leave=False):
+        for class_idx in tqdm(selected_classes[:num_classes], desc="grid classes", leave=False):
             eval_key = (
                 f"two_picard_grid_draft_{draft_id}_base_{base_id}"
                 f"_steps_{num_steps}_class_{class_idx}"
@@ -150,8 +173,6 @@ def run(force: bool = False) -> None:
             gen_images_list = {pair: [] for pair in pairs}
 
             metric = KernelInceptionDistance(subset_size=images_per_class)
-            metric.update(real_images, real=True)
-
             for idx in tqdm(range(images_per_class), desc=eval_key, leave=False):
                 pair_outputs = two_picard_trajectory_grid(
                     base_model,
@@ -176,8 +197,13 @@ def run(force: bool = False) -> None:
 
             pair_stats = []
             for pair in pairs:
+                metric.update(real_images, real=True)
                 metric.update(torch.stack(gen_images_list[pair], dim=0), real=False)
-                kid_score = float(metric.compute()[0])
+                
+                kid = metric.compute()
+                kid_score, kid_variance = float(kid[0]), float(kid[1])
+                metric.reset()
+
                 pair_stats.append(
                     asdict(
                         TwoPicardGridStat(
@@ -188,6 +214,7 @@ def run(force: bool = False) -> None:
                             draft_iters=pair[0],
                             base_iters=pair[1],
                             kid=kid_score,
+                            kid_variance=kid_variance
                         )
                     )
                 )
