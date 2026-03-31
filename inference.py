@@ -68,8 +68,6 @@ def speculative_trajectory(
     device = x.device
     batch_size, channels, height, width = x.shape
 
-    stream1, stream2 = torch.cuda.Stream(), torch.cuda.Stream()
-
     dt = 1.0 / num_steps
     t_traj = torch.arange(0, num_steps, device=device, dtype=x.dtype) / num_steps
     t_model = t_traj.unsqueeze(-1).expand(num_steps, batch_size)
@@ -106,6 +104,7 @@ def speculative_trajectory(
         guaranteed_prefix_len = min(i + 1, num_steps)
 
         if overlap:
+            stream1, stream2 = torch.cuda.Stream(), torch.cuda.Stream()
             with torch.cuda.stream(stream1):
                 for j in range(1, num_draft_steps + 1):
                     v_draft_final = model_call_cfg(
@@ -225,7 +224,7 @@ def picard_trajectory(
     y_null,
     num_steps: int,
     cfg_scale: float,
-    thresholds: List[float],
+    thresholds: List[float] | float,
     show_progress: bool = False,
     progress_desc: str = "picard",
 ):
@@ -236,6 +235,9 @@ def picard_trajectory(
 
     t_traj = torch.arange(0, num_steps, device=x.device, dtype=x.dtype) / num_steps
     t_model = t_traj.unsqueeze(-1).expand(num_steps, batch_size)
+
+    if isinstance(thresholds, (float, int)):
+        thresholds = [float(thresholds)]
 
     min_threshold = min(thresholds)
     threshold_schedule = compute_threshold_schedule(
@@ -250,7 +252,6 @@ def picard_trajectory(
 
     step_residuals = torch.tensor(float("inf"), device=x.device)
 
-    iters = 0
     residual_history = []
     step_residual_history = []
 
@@ -259,8 +260,6 @@ def picard_trajectory(
         iter_range = tqdm(iter_range, desc=progress_desc, leave=True)
 
     cumtime_iters = []
-    prev_x_outputs = []
-
     for i in iter_range:
         v_final = model_call_cfg(model, x_traj, t_model, y_traj, y_null_traj, cfg_scale)
         x_traj_new = x_traj_0.clone()
@@ -270,9 +269,6 @@ def picard_trajectory(
         step_residual_history.append(step_residuals)
         residual_history.append(step_residuals.cpu().numpy().flatten().flatten().tolist())
         x_traj = x_traj_new
-
-        # add the result after this tierationa
-        prev_x_outputs.append(x_traj[-1].clone())
 
         cumtime_iters.append(time.perf_counter() - t0)
         if has_converged(step_residuals, threshold_schedule):
@@ -290,13 +286,14 @@ def picard_trajectory(
         threshold_schedule_cpu = threshold_schedule.detach().cpu().numpy().flatten().tolist()
 
         curr_num_iters = 0
-        while curr_num_iters < num_steps:
-            if has_converged(step_residual_history[i], threshold_schedule):
+        while curr_num_iters < len(step_residual_history):
+            if has_converged(step_residual_history[curr_num_iters], threshold_schedule):
                 break
             curr_num_iters += 1
-        
-        num_iters_per_threshold.append(curr_num_iters + 1) # include the first iteration
-        time_per_threshold.append(cumtime_iters[curr_num_iters])
+
+        capped_idx = min(curr_num_iters, len(cumtime_iters) - 1)
+        num_iters_per_threshold.append(capped_idx + 1)
+        time_per_threshold.append(cumtime_iters[capped_idx])
 
         threshold_schedule_list.append(threshold_schedule_cpu)
 
@@ -324,6 +321,7 @@ def two_picard_trajectory(
     num_draft_steps: int,
     cfg_scale: float,
     threshold: float,
+    draft_threshold: float | None = None,
     show_progress: bool = False,
 ):
     batch_size, channels, height, width = x.shape
@@ -334,8 +332,10 @@ def two_picard_trajectory(
     threshold_schedule = compute_threshold_schedule(
         t_traj, threshold, batch_size * channels * height * width, num_steps, batch_size,
     )
+    if draft_threshold is None:
+        draft_threshold = threshold
     draft_threshold_schedule = compute_threshold_schedule(
-        t_traj, threshold, batch_size * channels * height * width, num_steps, batch_size
+        t_traj, draft_threshold, batch_size * channels * height * width, num_steps, batch_size
     )
     y_traj = y.unsqueeze(0).expand(num_steps, batch_size)
     y_null_traj = y_null.unsqueeze(0).expand(num_steps, batch_size)
@@ -409,7 +409,7 @@ def two_picard_trajectory_grid(
     x_traj_0 = x.unsqueeze(0).expand(num_steps, batch_size, channels, height, width)
     x_traj = x_traj_0.clone()
     
-    max_num_draft_steps = max([e[1] for e in picard_iteration_pairs])
+    max_num_draft_steps = max([e[0] for e in picard_iteration_pairs])
     draft_range = range(max_num_draft_steps)
     base_range = range(num_steps)
     if show_progress:
