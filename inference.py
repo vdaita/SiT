@@ -436,7 +436,7 @@ def two_picard_trajectory_grid(
             draft_iter_base_iter_map[p[0]] = []
         draft_iter_base_iter_map[p[0]].append(p[1])
 
-    pair_results: Dict[Tuple[int, int], List[torch.Tensor]] = {} 
+    pair_results: Dict[Tuple[int, int], torch.Tensor] = {} 
     
     for draft_iter_count in draft_iter_base_iter_map:
         base_iter_counts = draft_iter_base_iter_map[draft_iter_count]

@@ -7,9 +7,18 @@ from tqdm import tqdm
 
 from eval_common import CFG_SCALE, NUM_IMAGES, get_available_models, load_model, make_eval_batch, result_exists, save_result
 from inference import speculative_trajectory
+from typing import TypedDict, List
 
 SPEC_NAME = "speculative"
-SPECULATIVE_CONFIGS = [
+
+class SpeculativeConfig(TypedDict):
+    draft: str
+    base: str
+    spec_k: int
+    num_steps: List[int]
+    thresholds: List[float]
+
+SPECULATIVE_CONFIGS: List[SpeculativeConfig] = [
     {"draft": "S", "base": "B", "spec_k": 4, "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
     {"draft": "S", "base": "L", "spec_k": 4, "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
     {"draft": "B", "base": "L", "spec_k": 2, "num_steps": [16, 32], "thresholds": [0.05, 0.1]},

@@ -121,7 +121,7 @@ def run(force: bool = False) -> None:
                 continue
 
             selected_images = ds.filter(lambda row: row["label"] == class_idx)  # type: Dataset
-            real_images = selected_images.shuffle(seed=42).select(range(images_per_class))
+            real_images = selected_images.shuffle(seed=42).select(range(images_per_class)) # type: ignore
 
             def transform_batch(batch):
                 batch["image_tensor"] = [image_transform(img) for img in batch["image"]]
