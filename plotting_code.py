@@ -96,10 +96,8 @@ class MSSIMPoint:
     draft: str
     base: str
     num_steps: int
-    threshold: float
-    draft_init: int
-    draft_iters: float
-    base_iters: float
+    draft_iters: int
+    base_iters: int
     mssim_score: float
 
     @property
@@ -208,25 +206,29 @@ def parse_grid_results(raw: dict[str, list[dict[str, Any]]]) -> list[GridPoint]:
 
 
 def parse_mssim_results(raw: dict[str, list[dict[str, Any]]]) -> list[MSSIMPoint]:
-    points: list[MSSIMPoint] = []
+    grouped: dict[tuple[str, str, int, int, int], list[float]] = {}
     for key, records in raw.items():
-        match = TWO_PICARD_KEY_RE.fullmatch(key)
-        if not match or not records:
+        match = GRID_KEY_RE.fullmatch(key)
+        if not match:
             continue
-        record = records[0]
-        points.append(
-            MSSIMPoint(
-                draft=str(record.get("draft_model", match.group("draft"))),
-                base=str(record.get("base_model", match.group("base"))),
-                num_steps=int(record.get("num_steps", match.group("num_steps"))),
-                threshold=float(record.get("threshold", match.group("threshold"))),
-                draft_init=int(record.get("draft_init", match.group("draft_init"))),
-                draft_iters=float(record["draft_iters"]),
-                base_iters=float(record["base_iters"]),
-                mssim_score=float(record["mssim_score"]),
-            )
+        for record in records:
+            draft = record.get("draft_model", match.group("draft"))
+            base = record.get("base_model", match.group("base"))
+            num_steps = int(record.get("num_steps", match.group("num_steps")))
+            point_key = (draft, base, num_steps, int(record["draft_iters"]), int(record["base_iters"]))
+            grouped.setdefault(point_key, []).append(float(record["mssim_score"]))
+
+    return [
+        MSSIMPoint(
+            draft=draft,
+            base=base,
+            num_steps=num_steps,
+            draft_iters=draft_iters,
+            base_iters=base_iters,
+            mssim_score=float(np.mean(scores)),
         )
-    return points
+        for (draft, base, num_steps, draft_iters, base_iters), scores in grouped.items()
+    ]
 
 
 def ensure_plot_dir() -> None:
@@ -482,7 +484,7 @@ def plot_weighted_iters_vs_mssim(points: list[MSSIMPoint]) -> None:
 
         for point in pair_points:
             ax.annotate(
-                f"init={point.draft_init}, t={point.threshold:g}, s={point.num_steps}",
+                f"({point.draft_iters}, {point.base_iters})",
                 (point.weighted_iters, point.mssim_score),
                 textcoords="offset points",
                 xytext=(5, 5),
