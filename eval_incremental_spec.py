@@ -23,7 +23,7 @@ from eval_common import (
 )
 from inference import piecewise_picard_trajectory, upscaling_piecewise_picard
 
-NUM_IMAGES = 32
+NUM_IMAGES = 4
 
 SPEC_NAME = "incremental_spec"
 PLOTS_DIR = OUTPUTS_DIR / "plots"
@@ -37,7 +37,7 @@ CONFIGS = [
     {"label": "upscale_x4_x2", "num_steps_init": STEP_SIZE, "multiples": [4, 2]},
     {"label": "upscale_x2_x2_x2", "num_steps_init": STEP_SIZE, "multiples": [2, 2, 2]},
 ]
-
+MODELS = ["S"]
 
 @dataclass
 class IncrementalSpecStat:
@@ -86,15 +86,11 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
     for config in CONFIGS:
         _validate_config(config)
 
-    available_models = get_available_models()
-    if not available_models:
-        print("No model checkpoints available. Nothing to run.")
-        return
 
     x, y, y_null = make_eval_batch(num_images)
     store = _load_store()
 
-    for model_name in tqdm(available_models, desc="incremental models"):
+    for model_name in tqdm(models, desc="incremental models"):
         model = load_model(model_name)
         for threshold in THRESHOLDS:
             eval_key = _eval_key(model_name, threshold)

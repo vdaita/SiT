@@ -262,7 +262,8 @@ def piecewise_picard_trajectory(
         step_residuals = calculate_residuals(x_traj, x_traj_new)
         step_residuals_slice = step_residuals[start_index : min(num_steps, start_index + group_size)]
         mask = step_residuals_slice >= threshold_schedule_slice
-        idx = torch.nonzero(mask, as_tuple=False)[0].item() if mask.any() else -1
+        mask_nonzero = torch.nonzero(mask, as_tuple=False)
+        idx = mask_nonzero[0][0].item() if mask.any() else -1 # TODO: handle the indexing in a way that supports more images
         
         increment_amount = min(num_steps, start_index + group_size) - start_index
         if idx != -1:
