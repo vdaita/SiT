@@ -90,7 +90,7 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
     x, y, y_null = make_eval_batch(num_images)
     store = _load_store()
 
-    for model_name in tqdm(models, desc="incremental models"):
+    for model_name in tqdm(MODELS, desc="incremental models"):
         model = load_model(model_name)
         for threshold in THRESHOLDS:
             eval_key = _eval_key(model_name, threshold)

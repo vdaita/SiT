@@ -88,33 +88,7 @@ two_picard_grid_configs: List[TwoPicardGridConfig] = [
             {"draft_iters": 4, "base_iters": 12},
             {"draft_iters": 4, "base_iters": 16},
         ],
-    },
-    {
-        "draft": "S",
-        "base": "L",
-        "num_steps": 32,
-        "num_classes": 16,
-        "images_per_class": 50, # max is 100 images because that's how many there are in the test split 
-        "pairs": [
-            {"draft_iters": 16, "base_iters": 2},
-            {"draft_iters": 16, "base_iters": 4},
-            {"draft_iters": 16, "base_iters": 8},
-            {"draft_iters": 16, "base_iters": 12},
-            {"draft_iters": 16, "base_iters": 16},
-
-            {"draft_iters": 8, "base_iters": 2},
-            {"draft_iters": 8, "base_iters": 4},
-            {"draft_iters": 8, "base_iters": 8},
-            {"draft_iters": 8, "base_iters": 12},
-            {"draft_iters": 8, "base_iters": 16},
-
-            {"draft_iters": 4, "base_iters": 2},
-            {"draft_iters": 4, "base_iters": 4},
-            {"draft_iters": 4, "base_iters": 8},
-            {"draft_iters": 4, "base_iters": 12},
-            {"draft_iters": 4, "base_iters": 16},
-        ],
-    },
+    }
 ]
 
 
