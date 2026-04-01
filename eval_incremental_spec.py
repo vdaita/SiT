@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-from pathlib import Path
 
 import matplotlib
 
@@ -14,11 +13,14 @@ from tqdm import tqdm
 
 from eval_common import (
     CFG_SCALE,
+    IMAGES_DIR,
     OUTPUTS_DIR,
     get_available_models,
+    get_vae,
     load_model,
     load_results,
     make_eval_batch,
+    save_decoded_image,
     save_results,
 )
 from inference import piecewise_picard_trajectory, upscaling_piecewise_picard
@@ -74,6 +76,15 @@ def _eval_key(model_name: str, threshold: float) -> str:
     )
 
 
+def _image_eval_key(eval_key: str, config_label: str) -> str:
+    return f"{eval_key}_{config_label}"
+
+
+def _image_exists(eval_key: str, config_label: str, img_idx: int) -> bool:
+    image_dir = IMAGES_DIR / SPEC_NAME / _image_eval_key(eval_key, config_label)
+    return (image_dir / f"img_{img_idx:03d}.png").exists()
+
+
 def _validate_config(config: dict[str, object]) -> None:
     num_steps = int(config["num_steps_init"])
     for multiple in config["multiples"]:  # type: ignore[index]
@@ -93,6 +104,7 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
 
     x, y, y_null = make_eval_batch(num_images)
     store = _load_store()
+    vae = get_vae()
 
     for model_name in tqdm(available_models, desc="incremental models"):
         model = load_model(model_name)
@@ -107,12 +119,17 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
 
             for idx in tqdm(range(num_images), desc=eval_key, leave=False):
                 for config in CONFIGS:
-                    pair_key = (idx, str(config["label"]))
+                    config_label = str(config["label"])
+                    pair_key = (idx, config_label)
                     if pair_key in done_pairs:
+                        if _image_exists(eval_key, config_label, idx):
+                            continue
+                    elif _image_exists(eval_key, config_label, idx):
+                        done_pairs.add(pair_key)
                         continue
 
                     if config["multiples"]:
-                        _, total_iters = upscaling_piecewise_picard(
+                        output, total_iters = upscaling_piecewise_picard(
                             model=model,
                             x=x[idx],
                             y=y[idx],
@@ -124,7 +141,7 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                             group_size=STEP_SIZE,
                         )
                     else:
-                        _, total_iters = piecewise_picard_trajectory(
+                        output, total_iters = piecewise_picard_trajectory(
                             model=model,
                             x=x[idx],
                             y=y[idx],
@@ -135,6 +152,14 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                             group_size=STEP_SIZE,
                         )
 
+                    decoded_image = vae.decode(output / 0.18215).sample
+                    save_decoded_image(
+                        SPEC_NAME,
+                        _image_eval_key(eval_key, config_label),
+                        idx,
+                        decoded_image,
+                    )
+
                     records.append(
                         asdict(
                             IncrementalSpecStat(
@@ -143,7 +168,7 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                                 threshold=threshold,
                                 final_num_steps=FINAL_NUM_STEPS,
                                 step_size=STEP_SIZE,
-                                config_label=str(config["label"]),
+                                config_label=config_label,
                                 num_steps_init=int(config["num_steps_init"]),
                                 multiples=[int(v) for v in config["multiples"]],  # type: ignore[list-item]
                                 total_iters=int(total_iters),
