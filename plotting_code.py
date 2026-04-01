@@ -91,6 +91,29 @@ class GridPoint:
         )
 
 
+@dataclass(frozen=True)
+class MSSIMPoint:
+    draft: str
+    base: str
+    num_steps: int
+    threshold: float
+    draft_init: int
+    draft_iters: float
+    base_iters: float
+    mssim_score: float
+
+    @property
+    def pair_label(self) -> str:
+        return f"{self.draft} -> {self.base}"
+
+    @property
+    def weighted_iters(self) -> float:
+        return (
+            MODEL_WEIGHTS.get(self.draft, 1) * self.draft_iters
+            + MODEL_WEIGHTS.get(self.base, 1) * self.base_iters
+        )
+
+
 def sort_models(models: Iterable[str]) -> list[str]:
     return sorted(models, key=lambda model: MODEL_ORDER.index(model) if model in MODEL_ORDER else len(MODEL_ORDER))
 
@@ -182,6 +205,28 @@ def parse_grid_results(raw: dict[str, list[dict[str, Any]]]) -> list[GridPoint]:
         )
         for (draft, base, num_steps, draft_iters, base_iters), kids in grouped.items()
     ]
+
+
+def parse_mssim_results(raw: dict[str, list[dict[str, Any]]]) -> list[MSSIMPoint]:
+    points: list[MSSIMPoint] = []
+    for key, records in raw.items():
+        match = TWO_PICARD_KEY_RE.fullmatch(key)
+        if not match or not records:
+            continue
+        record = records[0]
+        points.append(
+            MSSIMPoint(
+                draft=str(record.get("draft_model", match.group("draft"))),
+                base=str(record.get("base_model", match.group("base"))),
+                num_steps=int(record.get("num_steps", match.group("num_steps"))),
+                threshold=float(record.get("threshold", match.group("threshold"))),
+                draft_init=int(record.get("draft_init", match.group("draft_init"))),
+                draft_iters=float(record["draft_iters"]),
+                base_iters=float(record["base_iters"]),
+                mssim_score=float(record["mssim_score"]),
+            )
+        )
+    return points
 
 
 def ensure_plot_dir() -> None:
@@ -343,6 +388,17 @@ def pareto_frontier(points: list[GridPoint]) -> list[GridPoint]:
     return frontier
 
 
+def pareto_frontier_mssim(points: list[MSSIMPoint]) -> list[MSSIMPoint]:
+    ordered = sorted(points, key=lambda point: (point.weighted_iters, -point.mssim_score))
+    frontier: list[MSSIMPoint] = []
+    best_mssim = -math.inf
+    for point in ordered:
+        if point.mssim_score > best_mssim:
+            frontier.append(point)
+            best_mssim = point.mssim_score
+    return frontier
+
+
 def plot_weighted_iters_vs_kid(grid_points: list[GridPoint]) -> None:
     if not grid_points:
         return
@@ -404,8 +460,70 @@ def plot_weighted_iters_vs_kid(grid_points: list[GridPoint]) -> None:
     save_figure(fig, "04_weighted_iters_vs_kid.png")
 
 
+def plot_weighted_iters_vs_mssim(points: list[MSSIMPoint]) -> None:
+    if not points:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    pair_labels = sorted({point.pair_label for point in points})
+    colors = {
+        label: color
+        for label, color in zip(
+            pair_labels,
+            ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2", "#B279A2"],
+        )
+    }
+
+    for pair_label in pair_labels:
+        pair_points = [point for point in points if point.pair_label == pair_label]
+        xs = [point.weighted_iters for point in pair_points]
+        ys = [point.mssim_score for point in pair_points]
+        ax.scatter(xs, ys, s=70, alpha=0.85, color=colors[pair_label], label=pair_label, edgecolors="black", linewidths=0.4)
+
+        for point in pair_points:
+            ax.annotate(
+                f"init={point.draft_init}, t={point.threshold:g}, s={point.num_steps}",
+                (point.weighted_iters, point.mssim_score),
+                textcoords="offset points",
+                xytext=(5, 5),
+                fontsize=8,
+            )
+
+    frontier = pareto_frontier_mssim(points)
+    ax.plot(
+        [point.weighted_iters for point in frontier],
+        [point.mssim_score for point in frontier],
+        color="black",
+        linewidth=1.8,
+        marker="o",
+        markersize=4,
+        label="Pareto frontier",
+    )
+
+    ax.set_title("Weighted sequential iterations vs MSSIM", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Weighted sequential iterations", fontsize=10)
+    ax.set_ylabel("MSSIM", fontsize=10)
+    ax.grid(alpha=0.25, linestyle=":")
+    ax.legend(fontsize=8)
+
+    weight_caption = ", ".join(f"{model}={weight}" for model, weight in MODEL_WEIGHTS.items())
+    ax.text(
+        0.01,
+        0.01,
+        f"Weights: {weight_caption}",
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=8,
+        bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+    )
+
+    save_figure(fig, "05_weighted_iters_vs_mssim.png")
+
+
 def main() -> None:
     baseline = parse_baseline_results(load_results("baseline"))
+    mssim_points = parse_mssim_results(load_results("mssim"))
     speculative = parse_speculative_results(load_results("speculative"))
     two_picard = parse_two_picard_results(load_results("two_picard_time"))
     grid_points = parse_grid_results(load_results("two_picard_grid"))
@@ -424,6 +542,11 @@ def main() -> None:
         plot_weighted_iters_vs_kid(grid_points)
     else:
         print("Skipping weighted-iterations vs KID plot: missing two_picard_grid results.")
+
+    if mssim_points:
+        plot_weighted_iters_vs_mssim(mssim_points)
+    else:
+        print("Skipping weighted-iterations vs MSSIM plot: missing mssim results.")
 
 
 if __name__ == "__main__":

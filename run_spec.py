@@ -5,12 +5,14 @@ import argparse
 import torch
 
 import eval_spec_baseline
+import eval_mssim
 import eval_spec_spec_traj
 import eval_spec_two_picard_grid
 import eval_spec_two_picard_time
 
 SPEC_RUNNERS = {
     "baseline": eval_spec_baseline.run,
+    "mssim": eval_mssim.run,
     "two_picard_time": eval_spec_two_picard_time.run,
     "speculative": eval_spec_spec_traj.run,
     "two_picard_grid": eval_spec_two_picard_grid.run,
@@ -33,7 +35,7 @@ def main() -> None:
 
     for spec_name in selected_specs:
         runner = SPEC_RUNNERS[spec_name]
-        if spec_name == "two_picard_grid":
+        if spec_name in {"two_picard_grid", "mssim"}:
             runner(force=args.force)
         elif args.num_images is None:
             runner(force=args.force)
