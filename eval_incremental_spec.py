@@ -29,21 +29,21 @@ from inference import (
     upscaling_piecewise_picard,
 )
 
-NUM_IMAGES = 4
+NUM_IMAGES = 32
 
 SPEC_NAME = "incremental_spec"
 PLOTS_DIR = OUTPUTS_DIR / "plots"
-FINAL_NUM_STEPS = 256
+FINAL_NUM_STEPS = 249
 STEP_SIZE = 32
 THRESHOLDS = [0.05, 0.1]
 CONFIGS = [
-    {"label": "direct_256", "num_steps_init": FINAL_NUM_STEPS, "multiples": []},
+    {"label": "direct_249", "num_steps_init": FINAL_NUM_STEPS, "multiples": []},
     {"label": "upscale_x8", "num_steps_init": STEP_SIZE, "multiples": [8]},
-    {"label": "upscale_x2_x4", "num_steps_init": STEP_SIZE, "multiples": [2, 4]},
-    {"label": "upscale_x4_x2", "num_steps_init": STEP_SIZE, "multiples": [4, 2]},
-    {"label": "upscale_x2_x2_x2", "num_steps_init": STEP_SIZE, "multiples": [2, 2, 2]},
+    # {"label": "upscale_x2_x4", "num_steps_init": STEP_SIZE, "multiples": [2, 4]},
+    # {"label": "upscale_x4_x2", "num_steps_init": STEP_SIZE, "multiples": [4, 2]},
+    # {"label": "upscale_x2_x2_x2", "num_steps_init": STEP_SIZE, "multiples": [2, 2, 2]},
 ]
-MODELS = ["S"]
+MODELS = ["B", "L"]
 
 @dataclass
 class IncrementalSpecStat:
@@ -96,7 +96,7 @@ def _eval_key(model_name: str, threshold: float) -> str:
 def _validate_config(config: dict[str, object]) -> None:
     num_steps = int(config["num_steps_init"])
     for multiple in config["multiples"]:  # type: ignore[index]
-        num_steps *= int(multiple)
+        num_steps = (num_steps - 1) * int(multiple) + 1
     if num_steps != FINAL_NUM_STEPS:
         raise ValueError(f"Config {config['label']} does not end at {FINAL_NUM_STEPS} steps.")
 
