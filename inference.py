@@ -255,6 +255,7 @@ def piecewise_picard_trajectory(
     y_null_traj = y_null.unsqueeze(0).expand(num_steps, batch_size)
 
     x_traj_0 = x.unsqueeze(0).expand(num_steps, batch_size, channels, height, width)
+    x_traj_orig = x_traj_0.clone() if (prev_x_traj is None) else prev_x_traj.clone()
     x_traj = x_traj_0.clone() if (prev_x_traj is None) else prev_x_traj
 
     start_index = 0
@@ -289,6 +290,8 @@ def piecewise_picard_trajectory(
             assert isinstance(idx, int), "idx (from the mask and what not) must be an int"
             increment_amount = max(idx - 1, 0) # the point of this is to keep the last converged as the starting point for the next sequence
         start_index += increment_amount
+        if increment_amount > 0:
+            x_traj[start_index + 1:] += x_traj[start_index] - x_traj_orig[start_index]
 
         x_traj = x_traj_new
         num_iterations += 1
