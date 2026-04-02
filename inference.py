@@ -217,6 +217,18 @@ class PicardResult:
     iters: List[int] # of length num_thresholds
     durations: List[float] # of length num_thresholds
 
+@dataclass
+class PiecewisePicardStageResult:
+    num_steps: int
+    iterations: int
+    group_size: int
+    threshold: float
+
+@dataclass
+class UpscalingPiecewisePicardResult:
+    total_iterations: int
+    stages: List[PiecewisePicardStageResult]
+
 def piecewise_picard_trajectory(
     model,
     x,
@@ -274,7 +286,12 @@ def piecewise_picard_trajectory(
         x_traj = x_traj_new
         num_iterations += 1
 
-    return x_traj, num_iterations
+    return x_traj, PiecewisePicardStageResult(
+        num_steps=num_steps,
+        iterations=num_iterations,
+        group_size=group_size,
+        threshold=threshold,
+    )
 
 def interp_steps(
     trajectory: torch.Tensor,
@@ -301,17 +318,22 @@ def upscaling_piecewise_picard(
     group_size: int,
 ):
     # calculate the first trajectory
-    x_traj, num_iterations_first = piecewise_picard_trajectory(model=model, x=x, y=y, y_null=y_null, num_steps=num_steps_init, cfg_scale=cfg_scale, threshold=threshold, group_size=group_size)
-    num_iterations_total = num_iterations_first
+    x_traj, initial_stage = piecewise_picard_trajectory(model=model, x=x, y=y, y_null=y_null, num_steps=num_steps_init, cfg_scale=cfg_scale, threshold=threshold, group_size=group_size)
+    stages = [initial_stage]
+    num_iterations_total = initial_stage.iterations
     curr_num_steps = num_steps_init
 
     for multiple in multiples:
         x_traj = interp_steps(x_traj, multiple)
         curr_num_steps = curr_num_steps * multiple
-        x_traj, num_iterations_step = piecewise_picard_trajectory(model=model, x=x, y=y, y_null=y_null, num_steps=curr_num_steps, cfg_scale=cfg_scale, threshold=threshold, group_size=group_size, prev_x_traj=x_traj)
-        num_iterations_total += num_iterations_step
+        x_traj, stage_result = piecewise_picard_trajectory(model=model, x=x, y=y, y_null=y_null, num_steps=curr_num_steps, cfg_scale=cfg_scale, threshold=threshold, group_size=group_size, prev_x_traj=x_traj)
+        stages.append(stage_result)
+        num_iterations_total += stage_result.iterations
     
-    return x_traj[-1], num_iterations_total
+    return x_traj[-1], UpscalingPiecewisePicardResult(
+        total_iterations=num_iterations_total,
+        stages=stages,
+    )
     
 def picard_trajectory(
     model,

@@ -21,7 +21,10 @@ from eval_common import (
     make_eval_batch,
     save_results,
 )
-from inference import piecewise_picard_trajectory, upscaling_piecewise_picard
+from inference import (
+    piecewise_picard_trajectory,
+    upscaling_piecewise_picard,
+)
 
 NUM_IMAGES = 4
 
@@ -50,6 +53,18 @@ class IncrementalSpecStat:
     num_steps_init: int
     multiples: list[int]
     total_iters: int
+    stage_num_steps: list[int]
+    stage_iters: list[int]
+    stage_multiples: list[int]
+
+
+def _stage_multiples(num_steps_init: int, stage_num_steps: list[int]) -> list[int]:
+    multiples: list[int] = []
+    prev_num_steps = num_steps_init
+    for num_steps in stage_num_steps[1:]:
+        multiples.append(int(num_steps // prev_num_steps))
+        prev_num_steps = int(num_steps)
+    return multiples
 
 
 def ensure_plot_dir() -> None:
@@ -108,7 +123,7 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                         continue
 
                     if config["multiples"]:
-                        _, total_iters = upscaling_piecewise_picard(
+                        _, stats = upscaling_piecewise_picard(
                             model=model,
                             x=x[idx],
                             y=y[idx],
@@ -119,8 +134,10 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                             threshold=threshold,
                             group_size=STEP_SIZE,
                         )
+                        total_iters = stats.total_iterations
+                        stage_results = stats.stages
                     else:
-                        _, total_iters = piecewise_picard_trajectory(
+                        _, stage_result = piecewise_picard_trajectory(
                             model=model,
                             x=x[idx],
                             y=y[idx],
@@ -130,6 +147,11 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                             threshold=threshold,
                             group_size=STEP_SIZE,
                         )
+                        stage_results = [stage_result]
+                        total_iters = stage_result.iterations
+
+                    stage_num_steps = [int(stage.num_steps) for stage in stage_results]
+                    stage_iters = [int(stage.iterations) for stage in stage_results]
 
                     records.append(
                         asdict(
@@ -143,6 +165,9 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                                 num_steps_init=int(config["num_steps_init"]),
                                 multiples=[int(v) for v in config["multiples"]],  # type: ignore[list-item]
                                 total_iters=int(total_iters),
+                                stage_num_steps=stage_num_steps,
+                                stage_iters=stage_iters,
+                                stage_multiples=_stage_multiples(int(config["num_steps_init"]), stage_num_steps),
                             )
                         )
                     )
