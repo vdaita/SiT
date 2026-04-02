@@ -31,7 +31,7 @@ class SpeculativeConfig(TypedDict):
     thresholds: List[float]
 
 SPECULATIVE_CONFIGS: List[SpeculativeConfig] = [
-    {"draft": "S", "base": "B", "spec_k": 4, "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
+    {"draft": "S", "base": "B", "spec_k": 4, "num_steps": [16, 32, 128], "thresholds": [0.05, 0.1]},
     {"draft": "S", "base": "L", "spec_k": 4, "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
     {"draft": "B", "base": "L", "spec_k": 2, "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
 ]

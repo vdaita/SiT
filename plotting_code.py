@@ -267,6 +267,10 @@ def plot_two_picard_wallclock(
                 baseline_cfg = BaselineConfig(model=base, num_steps=num_steps, threshold=threshold)
                 baseline_records = baseline.get(baseline_cfg)
                 if not baseline_records:
+                    print(
+                        "Skipping two-picard panel:"
+                        f" missing baseline for {base}, steps={num_steps}, threshold={threshold}"
+                    )
                     ax.set_visible(False)
                     continue
 

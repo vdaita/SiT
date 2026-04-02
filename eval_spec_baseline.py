@@ -22,7 +22,7 @@ from eval_common import (
 from inference import picard_trajectory
 
 SPEC_NAME = "baseline"
-NUM_STEPS_SWEEP = [8, 16, 32]
+NUM_STEPS_SWEEP = [8, 16, 32, 128]
 THRESHOLDS = [0.01, 0.05, 0.1]
 
 
