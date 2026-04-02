@@ -223,6 +223,7 @@ class PiecewisePicardStageResult:
     iterations: int
     group_size: int
     threshold: float
+    residual_history: List[List[float]]
 
 @dataclass
 class UpscalingPiecewisePicardResult:
@@ -258,6 +259,7 @@ def piecewise_picard_trajectory(
 
     start_index = 0
     num_iterations = 0
+    residual_history = []
 
     while start_index < num_steps - 1:
         x_traj_slice = x_traj[start_index : min(num_steps, start_index + group_size)]
@@ -276,6 +278,7 @@ def piecewise_picard_trajectory(
         x_traj_new[window_start : window_end] = x_traj[start_index] + torch.cumsum(v_model[:window_size], dim=0) * dt
 
         step_residuals = calculate_residuals(x_traj, x_traj_new)
+        residual_history.append(step_residuals.detach().cpu().numpy().flatten().tolist())
         step_residuals_slice = step_residuals[start_index : min(num_steps, start_index + group_size)]
         mask = step_residuals_slice >= threshold_schedule_slice
         mask_nonzero = torch.nonzero(mask, as_tuple=False)
@@ -295,6 +298,7 @@ def piecewise_picard_trajectory(
         iterations=num_iterations,
         group_size=group_size,
         threshold=threshold,
+        residual_history=residual_history,
     )
 
 def interp_steps(

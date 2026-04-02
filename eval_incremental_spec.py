@@ -56,6 +56,7 @@ class IncrementalSpecStat:
     stage_num_steps: list[int]
     stage_iters: list[int]
     stage_multiples: list[int]
+    stage_residual_histories: list[list[list[float]]]
 
 
 def _stage_multiples(num_steps_init: int, stage_num_steps: list[int]) -> list[int]:
@@ -152,6 +153,10 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
 
                     stage_num_steps = [int(stage.num_steps) for stage in stage_results]
                     stage_iters = [int(stage.iterations) for stage in stage_results]
+                    stage_residual_histories = [
+                        [[float(value) for value in residuals] for residuals in stage.residual_history]
+                        for stage in stage_results
+                    ]
 
                     records.append(
                         asdict(
@@ -168,6 +173,7 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                                 stage_num_steps=stage_num_steps,
                                 stage_iters=stage_iters,
                                 stage_multiples=_stage_multiples(int(config["num_steps_init"]), stage_num_steps),
+                                stage_residual_histories=stage_residual_histories,
                             )
                         )
                     )
