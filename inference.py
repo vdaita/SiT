@@ -239,7 +239,7 @@ def piecewise_picard_trajectory(
     cfg_scale: float,
     threshold: float,
     group_size: int, # how many can you infer at a given time?
-    prev_x_traj: Optional[torch.Tensor] = None,
+    prev_x_velocities: Optional[torch.Tensor] = None,
 ):
     batch_size, channels, height, width = x.shape
     dt = 1.0 / num_steps
@@ -255,8 +255,12 @@ def piecewise_picard_trajectory(
     y_null_traj = y_null.unsqueeze(0).expand(num_steps, batch_size)
 
     x_traj_0 = x.unsqueeze(0).expand(num_steps, batch_size, channels, height, width)
-    x_traj_orig = x_traj_0.clone() if (prev_x_traj is None) else prev_x_traj.clone()
-    x_traj = x_traj_0.clone() if (prev_x_traj is None) else prev_x_traj
+    x_traj = x_traj_0.clone()
+
+    if prev_x_velocities is None:
+        prev_x_velocities = torch.zeros((num_steps - 1, batch_size, channels, height, width))
+
+    x_traj[1:] = x_traj[0] + torch.cumsum(prev_x_velocities, dim=0)
 
     start_index = 0
     num_iterations = 0
@@ -291,7 +295,7 @@ def piecewise_picard_trajectory(
             increment_amount = max(idx - 1, 0) # the point of this is to keep the last converged as the starting point for the next sequence
         start_index += increment_amount
         if increment_amount > 0:
-            x_traj[start_index + 1:] += x_traj[start_index] - x_traj_orig[start_index]
+            x_traj_new[start_index + 1:] = x_traj_new[start_index] + torch.cumsum(prev_x_velocities[start_index:], dim=0) # we know that start_index is correct, what is the index that we have from the previous trajectory starting here?
 
         x_traj = x_traj_new
         num_iterations += 1
@@ -304,22 +308,17 @@ def piecewise_picard_trajectory(
         residual_history=residual_history,
     )
 
-def interp_steps(
+def get_interp_velocities(
     trajectory: torch.Tensor,
     multiple: int
 ):
     num_steps, batch_size, channels, height, width = trajectory.shape
-    new_num_steps = num_steps * multiple
-    
-    new_trajectory = torch.zeros(new_num_steps, batch_size, channels, height, width, dtype=trajectory.dtype, device=trajectory.device)
-    
-    for i in range(new_num_steps):
-        frac = i * (num_steps - 1) / (new_num_steps - 1)
-        lo = int(frac)
-        hi = min(lo + 1, num_steps - 1)
-        alpha = frac - lo
-        new_trajectory[i] = (1 - alpha) * trajectory[lo] + alpha * trajectory[hi]
-    return new_trajectory
+    velocities = trajectory[1:] - trajectory[:-1] # (num_steps - 1) elements
+    new_velocities = torch.zeros((num_steps - 1) * multiple, batch_size, channels, height, width, dtype=trajectory.dtype, device=trajectory.device)
+    for i in range(num_steps - 1):
+        for j in range(multiple):
+            new_velocities[multiple * i + j] = velocities[i] / multiple
+    return new_velocities
 
 def upscaling_piecewise_picard(
     model,
@@ -339,9 +338,9 @@ def upscaling_piecewise_picard(
     curr_num_steps = num_steps_init
 
     for multiple in multiples:
-        x_traj = interp_steps(x_traj, multiple)
-        curr_num_steps = curr_num_steps * multiple
-        x_traj, stage_result = piecewise_picard_trajectory(model=model, x=x, y=y, y_null=y_null, num_steps=curr_num_steps, cfg_scale=cfg_scale, threshold=threshold, group_size=group_size, prev_x_traj=x_traj)
+        x_velocities = get_interp_velocities(x_traj, multiple)
+        curr_num_steps = (curr_num_steps - 1) * multiple + 1
+        x_traj, stage_result = piecewise_picard_trajectory(model=model, x=x, y=y, y_null=y_null, num_steps=curr_num_steps, cfg_scale=cfg_scale, threshold=threshold, group_size=group_size, prev_x_velocities=x_velocities)
         stages.append(stage_result)
         num_iterations_total += stage_result.iterations
     
