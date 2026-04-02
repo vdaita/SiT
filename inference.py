@@ -269,7 +269,11 @@ def piecewise_picard_trajectory(
         v_model = model_call_cfg(model, x_traj_slice, t_model_slice, y_traj_slice, y_null_traj_slice, cfg_scale)
         x_traj_new = x_traj_0.clone()
         x_traj_new[:start_index + 1] = x_traj[:start_index + 1] # up to and including the start index the value remains the same
-        x_traj_new[start_index + 1 : min(num_steps, start_index + group_size)] = x_traj[start_index] + torch.cumsum(v_model[:-1], dim=0) * dt
+
+        window_start = start_index + 1
+        window_end = min(num_steps, start_index + group_size + 1)
+        window_size = window_end - window_start
+        x_traj_new[window_start : window_end] = x_traj[start_index] + torch.cumsum(v_model[:window_size], dim=0) * dt
 
         step_residuals = calculate_residuals(x_traj, x_traj_new)
         step_residuals_slice = step_residuals[start_index : min(num_steps, start_index + group_size)]
@@ -298,12 +302,16 @@ def interp_steps(
     multiple: int
 ):
     num_steps, batch_size, channels, height, width = trajectory.shape
-    new_trajectory = trajectory.unsqueeze(1).expand(num_steps, multiple, batch_size, channels, height, width)
-    new_trajectory = new_trajectory.reshape(num_steps * multiple, batch_size, channels, height, width)
-    for i in range(num_steps - 1):
-        for m in range(1, multiple):
-            alpha = m / multiple
-            new_trajectory[i * multiple + m] = (1 - alpha) * trajectory[i] + alpha * trajectory[i + 1]
+    new_num_steps = num_steps * multiple
+    
+    new_trajectory = torch.zeros(new_num_steps, batch_size, channels, height, width, dtype=trajectory.dtype, device=trajectory.device)
+    
+    for i in range(new_num_steps):
+        frac = i * (num_steps - 1) / (new_num_steps - 1)
+        lo = int(frac)
+        hi = min(lo + 1, num_steps - 1)
+        alpha = frac - lo
+        new_trajectory[i] = (1 - alpha) * trajectory[lo] + alpha * trajectory[hi]
     return new_trajectory
 
 def upscaling_piecewise_picard(
