@@ -258,7 +258,7 @@ def piecewise_picard_trajectory(
     x_traj = x_traj_0.clone()
 
     if prev_x_velocities is None:
-        prev_x_velocities = torch.zeros((num_steps - 1, batch_size, channels, height, width))
+        prev_x_velocities = torch.zeros((num_steps - 1, batch_size, channels, height, width), device=x_traj.device, dtype=x_traj.dtype)
 
     x_traj[1:] = x_traj[0] + torch.cumsum(prev_x_velocities, dim=0)
 
