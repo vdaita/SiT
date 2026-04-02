@@ -224,6 +224,7 @@ class PiecewisePicardStageResult:
     group_size: int
     threshold: float
     residual_history: List[List[float]]
+    final_latent: Optional[torch.Tensor] = None
 
 @dataclass
 class UpscalingPiecewisePicardResult:
@@ -306,6 +307,7 @@ def piecewise_picard_trajectory(
         group_size=group_size,
         threshold=threshold,
         residual_history=residual_history,
+        final_latent=x_traj[-1].detach().clone(),
     )
 
 def get_interp_velocities(

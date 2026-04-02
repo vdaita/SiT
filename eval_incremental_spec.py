@@ -19,6 +19,9 @@ from eval_common import (
     load_model,
     load_results,
     make_eval_batch,
+    get_vae,
+    images_complete,
+    save_decoded_image,
     save_results,
 )
 from inference import (
@@ -98,6 +101,57 @@ def _validate_config(config: dict[str, object]) -> None:
         raise ValueError(f"Config {config['label']} does not end at {FINAL_NUM_STEPS} steps.")
 
 
+def _config_eval_key(eval_key: str, config_label: str) -> str:
+    return f"{eval_key}_config_{config_label}"
+
+
+def _stage_eval_key(eval_key: str, config_label: str, stage_idx: int, num_steps: int) -> str:
+    return f"{_config_eval_key(eval_key, config_label)}_stage_{stage_idx:02d}_steps_{num_steps}"
+
+
+def _config_image_keys(eval_key: str, config: dict[str, object]) -> list[str]:
+    config_label = str(config["label"])
+    stage_num_steps = [int(config["num_steps_init"])]
+    current_num_steps = int(config["num_steps_init"])
+    for multiple in config["multiples"]:  # type: ignore[index]
+        current_num_steps = (current_num_steps - 1) * int(multiple) + 1
+        stage_num_steps.append(current_num_steps)
+
+    return [_config_eval_key(eval_key, config_label)] + [
+        _stage_eval_key(eval_key, config_label, stage_idx, num_steps)
+        for stage_idx, num_steps in enumerate(stage_num_steps, start=1)
+    ]
+
+
+def _images_complete_for_config(eval_key: str, config: dict[str, object], num_images: int) -> bool:
+    return all(images_complete(SPEC_NAME, image_key, num_images) for image_key in _config_image_keys(eval_key, config))
+
+
+def _save_stage_images(
+    vae,
+    eval_key: str,
+    config_label: str,
+    image_idx: int,
+    final_output: torch.Tensor,
+    stage_results,
+) -> None:
+    save_decoded_image(
+        SPEC_NAME,
+        _config_eval_key(eval_key, config_label),
+        image_idx,
+        vae.decode(final_output / 0.18215).sample,
+    )
+    for stage_idx, stage in enumerate(stage_results, start=1):
+        if stage.final_latent is None:
+            continue
+        save_decoded_image(
+            SPEC_NAME,
+            _stage_eval_key(eval_key, config_label, stage_idx, int(stage.num_steps)),
+            image_idx,
+            vae.decode(stage.final_latent / 0.18215).sample,
+        )
+
+
 def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
     for config in CONFIGS:
         _validate_config(config)
@@ -105,6 +159,7 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
 
     x, y, y_null = make_eval_batch(num_images)
     store = _load_store()
+    vae = get_vae()
 
     for model_name in tqdm(MODELS, desc="incremental models"):
         model = load_model(model_name)
@@ -120,11 +175,17 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
             for idx in tqdm(range(num_images), desc=eval_key, leave=False):
                 for config in CONFIGS:
                     pair_key = (idx, str(config["label"]))
-                    if pair_key in done_pairs:
+                    if pair_key in done_pairs and _images_complete_for_config(eval_key, config, num_images):
                         continue
+                    if pair_key in done_pairs:
+                        records = [
+                            record
+                            for record in records
+                            if (int(record["img_idx"]), str(record["config_label"])) != pair_key
+                        ]
 
                     if config["multiples"]:
-                        _, stats = upscaling_piecewise_picard(
+                        output, stats = upscaling_piecewise_picard(
                             model=model,
                             x=x[idx],
                             y=y[idx],
@@ -138,7 +199,7 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                         total_iters = stats.total_iterations
                         stage_results = stats.stages
                     else:
-                        _, stage_result = piecewise_picard_trajectory(
+                        output_traj, stage_result = piecewise_picard_trajectory(
                             model=model,
                             x=x[idx],
                             y=y[idx],
@@ -150,6 +211,9 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                         )
                         stage_results = [stage_result]
                         total_iters = stage_result.iterations
+                        output = output_traj[-1]
+
+                    _save_stage_images(vae, eval_key, str(config["label"]), idx, output, stage_results)
 
                     stage_num_steps = [int(stage.num_steps) for stage in stage_results]
                     stage_iters = [int(stage.iterations) for stage in stage_results]
