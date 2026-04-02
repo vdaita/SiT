@@ -332,6 +332,8 @@ def plot_speculative_acceptance(speculative: dict[SpeculativeConfig, list[dict[s
     spec_ks = sorted({cfg.spec_k for cfg in speculative})
     pairs = sorted({(cfg.draft, cfg.base) for cfg in speculative}, key=lambda pair: tuple(sort_models(pair)))
     steps = sorted({cfg.num_steps for cfg in speculative})
+    isolated_pair = ("S", "B")
+    isolated_steps = {128}
 
     for threshold in thresholds:
         for spec_k in spec_ks:
@@ -344,6 +346,8 @@ def plot_speculative_acceptance(speculative: dict[SpeculativeConfig, list[dict[s
                     plotted = False
 
                     for line_style, num_steps in zip(["-", "--", ":", "-."], steps):
+                        if (draft, base) == isolated_pair and num_steps in isolated_steps:
+                            continue
                         cfg = SpeculativeConfig(
                             draft=draft,
                             base=base,
@@ -381,6 +385,61 @@ def plot_speculative_acceptance(speculative: dict[SpeculativeConfig, list[dict[s
                         ax.legend(fontsize=7)
 
             save_figure(fig, f"03_spec_acceptance_threshold_{threshold}_K{spec_k}.png")
+
+            for num_steps in sorted(isolated_steps):
+                fig, axes = plt.subplots(2, 1, figsize=(6, 8), squeeze=False)
+                fig.suptitle(
+                    f"Speculative acceptance ({isolated_pair[0]} -> {isolated_pair[1]}, steps={num_steps}, threshold={threshold}, K={spec_k})",
+                    fontsize=13,
+                    fontweight="bold",
+                )
+
+                for row, overlap in enumerate([True, False]):
+                    ax = axes[row][0]
+                    cfg = SpeculativeConfig(
+                        draft=isolated_pair[0],
+                        base=isolated_pair[1],
+                        num_steps=num_steps,
+                        threshold=threshold,
+                        spec_k=spec_k,
+                        overlap=overlap,
+                    )
+                    records = speculative.get(cfg)
+                    if records:
+                        series = [acceptance_series(record) for record in records]
+                        max_len = max(len(item) for item in series)
+                        padded = np.full((len(series), max_len), np.nan)
+                        for idx, item in enumerate(series):
+                            padded[idx, : len(item)] = np.array(item, dtype=float)
+
+                        means = np.nanmean(padded, axis=0)
+                        stds = np.nanstd(padded, axis=0)
+                        xs = np.arange(1, max_len + 1)
+                        color = "#4C78A8" if overlap else "#F58518"
+                        label = f"steps={num_steps} (mean={float(np.nanmean(means)):.2f})"
+                        ax.plot(xs, means, linestyle="-", color=color, linewidth=1.8, label=label)
+                        ax.fill_between(
+                            xs,
+                            np.clip(means - stds, 0, 1),
+                            np.clip(means + stds, 0, 1),
+                            color=color,
+                            alpha=0.12,
+                        )
+                        ax.legend(fontsize=8)
+
+                    ax.set_ylim(0.0, 1.05)
+                    ax.set_title(
+                        f"{isolated_pair[0]} -> {isolated_pair[1]} [{'overlap' if overlap else 'sequential'}]",
+                        fontsize=10,
+                    )
+                    ax.set_xlabel("Outer iteration", fontsize=9)
+                    ax.set_ylabel("Acceptance rate", fontsize=9)
+                    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+
+                save_figure(
+                    fig,
+                    f"03_spec_acceptance_{isolated_pair[0]}_{isolated_pair[1]}_steps_{num_steps}_threshold_{threshold}_K{spec_k}.png",
+                )
 
 
 def pareto_frontier(points: list[GridPoint]) -> list[GridPoint]:
