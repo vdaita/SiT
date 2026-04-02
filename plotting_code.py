@@ -251,6 +251,8 @@ def plot_two_picard_wallclock(
     thresholds = sorted({cfg.threshold for cfg in two_picard})
     pairs = sorted({(cfg.draft, cfg.base) for cfg in two_picard}, key=lambda pair: tuple(sort_models(pair)))
     steps = sorted({cfg.num_steps for cfg in two_picard})
+    isolated_pair = ("S", "B")
+    isolated_steps = {128}
 
     for threshold in thresholds:
         fig, axes = plt.subplots(
@@ -264,6 +266,9 @@ def plot_two_picard_wallclock(
         for row, num_steps in enumerate(steps):
             for col, (draft, base) in enumerate(pairs):
                 ax = axes[row][col]
+                if (draft, base) == isolated_pair and num_steps in isolated_steps:
+                    ax.set_visible(False)
+                    continue
                 baseline_cfg = BaselineConfig(model=base, num_steps=num_steps, threshold=threshold)
                 baseline_records = baseline.get(baseline_cfg)
                 if not baseline_records:
@@ -319,6 +324,67 @@ def plot_two_picard_wallclock(
 
         save_figure(fig, f"02_twopic_wallclock_threshold_{threshold}.png")
 
+        for num_steps in sorted(isolated_steps):
+            fig, ax = plt.subplots(figsize=(6, 4))
+            draft, base = isolated_pair
+            baseline_cfg = BaselineConfig(model=base, num_steps=num_steps, threshold=threshold)
+            baseline_records = baseline.get(baseline_cfg)
+            if not baseline_records:
+                print(
+                    "Skipping isolated two-picard panel:"
+                    f" missing baseline for {base}, steps={num_steps}, threshold={threshold}"
+                )
+                plt.close(fig)
+                continue
+
+            base_by_idx = {record["img_idx"]: record["wall_clock_s"] for record in baseline_records}
+            configs = sorted(
+                [
+                    cfg
+                    for cfg in two_picard
+                    if cfg.draft == draft and cfg.base == base and cfg.num_steps == num_steps and cfg.threshold == threshold
+                ],
+                key=lambda cfg: cfg.draft_init,
+            )
+            box_data: list[list[float]] = []
+            labels: list[str] = []
+            medians: list[float] = []
+
+            for cfg in configs:
+                ratios = [
+                    100.0 * record["wall_clock_s"] / base_by_idx[record["img_idx"]]
+                    for record in two_picard[cfg]
+                    if record["img_idx"] in base_by_idx and base_by_idx[record["img_idx"]] > 0
+                ]
+                if not ratios:
+                    continue
+                box_data.append(ratios)
+                labels.append(str(cfg.draft_init))
+                medians.append(float(np.median(ratios)))
+
+            if not box_data:
+                plt.close(fig)
+                continue
+
+            boxplot = ax.boxplot(
+                box_data,
+                patch_artist=True,
+                medianprops={"color": "black", "linewidth": 1.4},
+            )
+            for patch in boxplot["boxes"]:
+                patch.set_facecolor("#4C78A8")
+                patch.set_alpha(0.65)
+
+            ax.plot(range(1, len(medians) + 1), medians, color="#1F3552", linewidth=1.2, marker="o", markersize=3)
+            ax.axhline(100, color="#E45756", linestyle="--", linewidth=1.0)
+            ax.set_xticks(range(1, len(labels) + 1))
+            ax.set_xticklabels(labels, fontsize=8)
+            ax.set_title(f"{draft} -> {base}", fontsize=10)
+            ax.set_xlabel("Draft init iters", fontsize=9)
+            ax.set_ylabel(f"steps={num_steps}\n% of baseline wall-clock", fontsize=9)
+
+            save_figure(fig, f"02_twopic_wallclock_{draft}_{base}_steps_{num_steps}_threshold_{threshold}.png")
+
 
 def acceptance_series(record: dict[str, Any]) -> list[float]:
     if "acceptance_history" in record:
@@ -332,8 +398,6 @@ def plot_speculative_acceptance(speculative: dict[SpeculativeConfig, list[dict[s
     spec_ks = sorted({cfg.spec_k for cfg in speculative})
     pairs = sorted({(cfg.draft, cfg.base) for cfg in speculative}, key=lambda pair: tuple(sort_models(pair)))
     steps = sorted({cfg.num_steps for cfg in speculative})
-    isolated_pair = ("S", "B")
-    isolated_steps = {128}
 
     for threshold in thresholds:
         for spec_k in spec_ks:
@@ -346,8 +410,6 @@ def plot_speculative_acceptance(speculative: dict[SpeculativeConfig, list[dict[s
                     plotted = False
 
                     for line_style, num_steps in zip(["-", "--", ":", "-."], steps):
-                        if (draft, base) == isolated_pair and num_steps in isolated_steps:
-                            continue
                         cfg = SpeculativeConfig(
                             draft=draft,
                             base=base,
@@ -385,61 +447,6 @@ def plot_speculative_acceptance(speculative: dict[SpeculativeConfig, list[dict[s
                         ax.legend(fontsize=7)
 
             save_figure(fig, f"03_spec_acceptance_threshold_{threshold}_K{spec_k}.png")
-
-            for num_steps in sorted(isolated_steps):
-                fig, axes = plt.subplots(2, 1, figsize=(6, 8), squeeze=False)
-                fig.suptitle(
-                    f"Speculative acceptance ({isolated_pair[0]} -> {isolated_pair[1]}, steps={num_steps}, threshold={threshold}, K={spec_k})",
-                    fontsize=13,
-                    fontweight="bold",
-                )
-
-                for row, overlap in enumerate([True, False]):
-                    ax = axes[row][0]
-                    cfg = SpeculativeConfig(
-                        draft=isolated_pair[0],
-                        base=isolated_pair[1],
-                        num_steps=num_steps,
-                        threshold=threshold,
-                        spec_k=spec_k,
-                        overlap=overlap,
-                    )
-                    records = speculative.get(cfg)
-                    if records:
-                        series = [acceptance_series(record) for record in records]
-                        max_len = max(len(item) for item in series)
-                        padded = np.full((len(series), max_len), np.nan)
-                        for idx, item in enumerate(series):
-                            padded[idx, : len(item)] = np.array(item, dtype=float)
-
-                        means = np.nanmean(padded, axis=0)
-                        stds = np.nanstd(padded, axis=0)
-                        xs = np.arange(1, max_len + 1)
-                        color = "#4C78A8" if overlap else "#F58518"
-                        label = f"steps={num_steps} (mean={float(np.nanmean(means)):.2f})"
-                        ax.plot(xs, means, linestyle="-", color=color, linewidth=1.8, label=label)
-                        ax.fill_between(
-                            xs,
-                            np.clip(means - stds, 0, 1),
-                            np.clip(means + stds, 0, 1),
-                            color=color,
-                            alpha=0.12,
-                        )
-                        ax.legend(fontsize=8)
-
-                    ax.set_ylim(0.0, 1.05)
-                    ax.set_title(
-                        f"{isolated_pair[0]} -> {isolated_pair[1]} [{'overlap' if overlap else 'sequential'}]",
-                        fontsize=10,
-                    )
-                    ax.set_xlabel("Outer iteration", fontsize=9)
-                    ax.set_ylabel("Acceptance rate", fontsize=9)
-                    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
-
-                save_figure(
-                    fig,
-                    f"03_spec_acceptance_{isolated_pair[0]}_{isolated_pair[1]}_steps_{num_steps}_threshold_{threshold}_K{spec_k}.png",
-                )
 
 
 def pareto_frontier(points: list[GridPoint]) -> list[GridPoint]:
