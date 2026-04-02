@@ -294,7 +294,7 @@ def piecewise_picard_trajectory(
             assert isinstance(idx, int), "idx (from the mask and what not) must be an int"
             increment_amount = max(idx - 1, 0) # the point of this is to keep the last converged as the starting point for the next sequence
         start_index += increment_amount
-        if increment_amount > 0:
+        if increment_amount > 0 and start_index + 1 < num_steps:
             x_traj_new[start_index + 1:] = x_traj_new[start_index] + torch.cumsum(prev_x_velocities[start_index:], dim=0) # we know that start_index is correct, what is the index that we have from the previous trajectory starting here?
 
         x_traj = x_traj_new

@@ -30,9 +30,9 @@ class ModelPair(TypedDict):
     thresholds: List[float]
 
 MODEL_PAIRS: List[ModelPair] = [
-    {"draft": "S", "base": "B", "num_steps": [16, 32, 128], "thresholds": [0.05, 0.1]},
-    {"draft": "S", "base": "L", "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
-    {"draft": "B", "base": "L", "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
+    {"draft": "S", "base": "B", "num_steps": [128], "thresholds": [0.1]},
+    # {"draft": "S", "base": "L", "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
+    # {"draft": "B", "base": "L", "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
 ]
 
 
