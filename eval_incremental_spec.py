@@ -33,16 +33,17 @@ NUM_IMAGES = 32
 
 SPEC_NAME = "incremental_spec"
 PLOTS_DIR = OUTPUTS_DIR / "plots"
-FINAL_NUM_STEPS = 249
-STEP_SIZE = 32
+FINAL_NUM_STEPS = 256 + 1
+STEP_SIZE = 33
 THRESHOLDS = [0.05, 0.1]
 CONFIGS = [
-    {"label": "direct_249", "num_steps_init": FINAL_NUM_STEPS, "multiples": []},
+    {"label": "direct_257", "num_steps_init": FINAL_NUM_STEPS, "multiples": []},
     {"label": "upscale_x8", "num_steps_init": STEP_SIZE, "multiples": [8]},
     # {"label": "upscale_x2_x4", "num_steps_init": STEP_SIZE, "multiples": [2, 4]},
     # {"label": "upscale_x4_x2", "num_steps_init": STEP_SIZE, "multiples": [4, 2]},
     # {"label": "upscale_x2_x2_x2", "num_steps_init": STEP_SIZE, "multiples": [2, 2, 2]},
 ]
+
 MODELS = ["B", "L"]
 
 @dataclass
@@ -66,7 +67,10 @@ def _stage_multiples(num_steps_init: int, stage_num_steps: list[int]) -> list[in
     multiples: list[int] = []
     prev_num_steps = num_steps_init
     for num_steps in stage_num_steps[1:]:
-        multiples.append(int(num_steps // prev_num_steps))
+        if prev_num_steps <= 1:
+            multiples.append(1)
+        else:
+            multiples.append(int((num_steps - 1) // (prev_num_steps - 1)))
         prev_num_steps = int(num_steps)
     return multiples
 
@@ -194,7 +198,7 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                             multiples=[int(v) for v in config["multiples"]],  # type: ignore[list-item]
                             cfg_scale=CFG_SCALE,
                             threshold=threshold,
-                            group_size=STEP_SIZE,
+                            group_size=STEP_SIZE
                         )
                         total_iters = stats.total_iterations
                         stage_results = stats.stages
@@ -295,7 +299,7 @@ def plot() -> None:
             for record in model_records:
                 grouped.setdefault(str(record["config_label"]), []).append(record)
 
-            labels = [str(config["label"]) for config in CONFIGS if str(config["label"]) in grouped]
+            labels = sorted(grouped.keys())
             if not labels:
                 axes[row][0].set_visible(False)
                 continue

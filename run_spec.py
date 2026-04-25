@@ -8,12 +8,12 @@ import eval_spec_baseline
 import eval_mssim
 import eval_spec_spec_traj
 import eval_spec_two_picard_grid
-import eval_spec_two_picard_time
+import eval_spec_two_picard_iterations
 
 SPEC_RUNNERS = {
     "baseline": eval_spec_baseline.run,
     "mssim": eval_mssim.run,
-    "two_picard_time": eval_spec_two_picard_time.run,
+    "two_picard_iterations": eval_spec_two_picard_iterations.run,
     "speculative": eval_spec_spec_traj.run,
     "two_picard_grid": eval_spec_two_picard_grid.run,
 }

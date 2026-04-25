@@ -459,13 +459,8 @@ def two_picard_trajectory(
     show_progress: bool = False,
 ):
     batch_size, channels, height, width = x.shape
-    dt = 1.0 / num_steps
-
     t_traj = torch.arange(0, num_steps, device=x.device, dtype=x.dtype) / num_steps
     t_model = t_traj.unsqueeze(-1).expand(num_steps, batch_size)
-    threshold_schedule = compute_threshold_schedule(
-        t_traj, threshold, batch_size * channels * height * width, num_steps, batch_size,
-    )
     if draft_threshold is None:
         draft_threshold = threshold
     draft_threshold_schedule = compute_threshold_schedule(
@@ -485,16 +480,14 @@ def two_picard_trajectory(
     base_residual_history = []
 
     draft_range = range(min(num_steps, num_draft_steps))
-    base_range = range(num_steps)
     if show_progress:
         draft_range = tqdm(draft_range, desc="Draft Picard", leave=True)
-        base_range = tqdm(base_range, desc="Base Picard", leave=True)
 
     for i in draft_range:
         draft_iters = i + 1
         v_final = model_call_cfg(draft_model, x_traj, t_model, y_traj, y_null_traj, cfg_scale)
         x_traj_new = x_traj_0.clone()
-        x_traj_new[1:] = x_traj_new[1:] + torch.cumsum(v_final[:-1], dim=0) * dt
+        x_traj_new[1:] = x_traj_new[1:] + torch.cumsum(v_final[:-1], dim=0) * (1.0 / num_steps)
 
         step_residuals = calculate_residuals(x_traj, x_traj_new)
         draft_residual_history.append(step_residuals.cpu().numpy().flatten().tolist())
@@ -502,17 +495,19 @@ def two_picard_trajectory(
         if has_converged(step_residuals, draft_threshold_schedule):
             break
 
-    for i in base_range:
-        base_iters = i + 1
-        v_final = model_call_cfg(base_model, x_traj, t_model, y_traj, y_null_traj, cfg_scale)
-        x_traj_new = x_traj_0.clone()
-        x_traj_new[1:] = x_traj_new[1:] + torch.cumsum(v_final[:-1], dim=0) * dt
-        
-        step_residuals = calculate_residuals(x_traj, x_traj_new)
-        base_residual_history.append(step_residuals.cpu().numpy().flatten().tolist())
-        x_traj = x_traj_new
-        if has_converged(step_residuals, threshold_schedule):
-            break
+    x_traj, base_stage = piecewise_picard_trajectory(
+        model=base_model,
+        x=x,
+        y=y,
+        y_null=y_null,
+        num_steps=num_steps,
+        cfg_scale=cfg_scale,
+        threshold=threshold,
+        group_size=64,
+        prev_x_velocities=x_traj[1:] - x_traj[:-1],
+    )
+    base_iters = base_stage.iterations
+    base_residual_history = base_stage.residual_history
 
     return x_traj[-1], TwoPicardResult(
         draft_iters=draft_iters,

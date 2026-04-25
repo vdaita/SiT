@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
+from typing import List, TypedDict
 
+import torch
 from tqdm import tqdm
 
 from eval_common import (
@@ -18,33 +19,32 @@ from eval_common import (
     save_result,
 )
 from inference import two_picard_trajectory
-from typing import TypedDict, List
-import torch
 
-SPEC_NAME = "two_picard_time"
-DRAFT_INIT_SWEEP = [1, 2, 4, 8]
+SPEC_NAME = "two_picard_iterations"
+DRAFT_INIT_SWEEP = [0, 1, 2, 4, 8, 12]
+
+
 class ModelPair(TypedDict):
     draft: str
     base: str
     num_steps: List[int]
     thresholds: List[float]
 
+
 MODEL_PAIRS: List[ModelPair] = [
-    {"draft": "S", "base": "B", "num_steps": [128], "thresholds": [0.1]},
-    # {"draft": "S", "base": "L", "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
-    # {"draft": "B", "base": "L", "num_steps": [16, 32], "thresholds": [0.05, 0.1]},
+    {"draft": "S", "base": "B", "num_steps": [256], "thresholds": [0.05, 0.1]},
+    {"draft": "S", "base": "L", "num_steps": [256], "thresholds": [0.05, 0.1]},
 ]
 
 
 @dataclass
-class TwoPicardTimingStat:
+class TwoPicardIterationStat:
     img_idx: int
     draft_model: str
     base_model: str
     num_steps: int
     threshold: float
     draft_init: int
-    wall_clock_s: float
     draft_iters: int
     base_iters: int
     draft_residual_history: list[list[float]]
@@ -74,7 +74,6 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
 
                     records = []
                     for idx in tqdm(range(num_images), desc=eval_key, leave=False):
-                        t0 = time.perf_counter()
                         output, stats = two_picard_trajectory(
                             base_model,
                             draft_model,
@@ -90,14 +89,13 @@ def run(num_images: int = NUM_IMAGES, force: bool = False) -> None:
                         save_decoded_image(SPEC_NAME, eval_key, idx, decoded_image)
                         records.append(
                             asdict(
-                                TwoPicardTimingStat(
+                                TwoPicardIterationStat(
                                     img_idx=idx,
                                     draft_model=pair["draft"],
                                     base_model=pair["base"],
                                     num_steps=num_steps,
                                     threshold=threshold,
                                     draft_init=draft_init,
-                                    wall_clock_s=time.perf_counter() - t0,
                                     draft_iters=stats.draft_iters,
                                     base_iters=stats.base_iters,
                                     draft_residual_history=stats.draft_residual_history,

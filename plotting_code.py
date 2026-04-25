@@ -123,6 +123,13 @@ def metric_mean_std(records: list[dict[str, Any]], field: str) -> tuple[float, f
     return float(np.mean(values)), float(np.std(values))
 
 
+def metric_median(records: list[dict[str, Any]], field: str) -> float:
+    values = np.array([record[field] for record in records if record.get(field) is not None], dtype=float)
+    if values.size == 0:
+        return float("nan")
+    return float(np.median(values))
+
+
 def parse_baseline_results(raw: dict[str, list[dict[str, Any]]]) -> dict[BaselineConfig, list[dict[str, Any]]]:
     parsed: dict[BaselineConfig, list[dict[str, Any]]] = {}
     for key, records in raw.items():
@@ -244,15 +251,10 @@ def save_figure(fig: plt.Figure, filename: str) -> None:
     print(f"Saved {path}")
 
 
-def plot_two_picard_wallclock(
-    baseline: dict[BaselineConfig, list[dict[str, Any]]],
-    two_picard: dict[TwoPicardConfig, list[dict[str, Any]]],
-) -> None:
+def plot_two_picard_iterations(two_picard: dict[TwoPicardConfig, list[dict[str, Any]]]) -> None:
     thresholds = sorted({cfg.threshold for cfg in two_picard})
     pairs = sorted({(cfg.draft, cfg.base) for cfg in two_picard}, key=lambda pair: tuple(sort_models(pair)))
     steps = sorted({cfg.num_steps for cfg in two_picard})
-    isolated_pair = ("S", "B")
-    isolated_steps = {128}
 
     for threshold in thresholds:
         fig, axes = plt.subplots(
@@ -261,129 +263,39 @@ def plot_two_picard_wallclock(
             figsize=(5 * max(len(pairs), 1), 4 * max(len(steps), 1)),
             squeeze=False,
         )
-        fig.suptitle(f"Two-Picard wall clock vs baseline (threshold={threshold})", fontsize=13, fontweight="bold")
+        fig.suptitle(f"Two-Picard base iterations vs draft iterations (threshold={threshold})", fontsize=13, fontweight="bold")
 
         for row, num_steps in enumerate(steps):
             for col, (draft, base) in enumerate(pairs):
                 ax = axes[row][col]
-                if (draft, base) == isolated_pair and num_steps in isolated_steps:
-                    ax.set_visible(False)
-                    continue
-                baseline_cfg = BaselineConfig(model=base, num_steps=num_steps, threshold=threshold)
-                baseline_records = baseline.get(baseline_cfg)
-                if not baseline_records:
-                    print(
-                        "Skipping two-picard panel:"
-                        f" missing baseline for {base}, steps={num_steps}, threshold={threshold}"
-                    )
-                    ax.set_visible(False)
-                    continue
-
-                base_by_idx = {record["img_idx"]: record["wall_clock_s"] for record in baseline_records}
                 configs = sorted(
                     [cfg for cfg in two_picard if cfg.draft == draft and cfg.base == base and cfg.num_steps == num_steps and cfg.threshold == threshold],
                     key=lambda cfg: cfg.draft_init,
                 )
-                box_data: list[list[float]] = []
                 labels: list[str] = []
                 medians: list[float] = []
 
                 for cfg in configs:
-                    ratios = [
-                        100.0 * record["wall_clock_s"] / base_by_idx[record["img_idx"]]
-                        for record in two_picard[cfg]
-                        if record["img_idx"] in base_by_idx and base_by_idx[record["img_idx"]] > 0
-                    ]
-                    if not ratios:
+                    median_iters = metric_median(two_picard[cfg], "base_iters")
+                    if np.isnan(median_iters):
                         continue
-                    box_data.append(ratios)
                     labels.append(str(cfg.draft_init))
-                    medians.append(float(np.median(ratios)))
+                    medians.append(median_iters)
 
-                if not box_data:
+                if not medians:
                     ax.set_visible(False)
                     continue
 
-                boxplot = ax.boxplot(
-                    box_data,
-                    patch_artist=True,
-                    medianprops={"color": "black", "linewidth": 1.4},
-                )
-                for patch in boxplot["boxes"]:
-                    patch.set_facecolor("#4C78A8")
-                    patch.set_alpha(0.65)
-
                 ax.plot(range(1, len(medians) + 1), medians, color="#1F3552", linewidth=1.2, marker="o", markersize=3)
-                ax.axhline(100, color="#E45756", linestyle="--", linewidth=1.0)
                 ax.set_xticks(range(1, len(labels) + 1))
                 ax.set_xticklabels(labels, fontsize=8)
                 ax.set_title(f"{draft} -> {base}", fontsize=10)
                 ax.set_xlabel("Draft init iters", fontsize=9)
                 if col == 0:
-                    ax.set_ylabel(f"steps={num_steps}\n% of baseline wall-clock", fontsize=9)
+                    ax.set_ylabel(f"steps={num_steps}\nBase iterations", fontsize=9)
+                ax.grid(alpha=0.25, linestyle=":")
 
-        save_figure(fig, f"02_twopic_wallclock_threshold_{threshold}.png")
-
-        for num_steps in sorted(isolated_steps):
-            fig, ax = plt.subplots(figsize=(6, 4))
-            draft, base = isolated_pair
-            baseline_cfg = BaselineConfig(model=base, num_steps=num_steps, threshold=threshold)
-            baseline_records = baseline.get(baseline_cfg)
-            if not baseline_records:
-                print(
-                    "Skipping isolated two-picard panel:"
-                    f" missing baseline for {base}, steps={num_steps}, threshold={threshold}"
-                )
-                plt.close(fig)
-                continue
-
-            base_by_idx = {record["img_idx"]: record["wall_clock_s"] for record in baseline_records}
-            configs = sorted(
-                [
-                    cfg
-                    for cfg in two_picard
-                    if cfg.draft == draft and cfg.base == base and cfg.num_steps == num_steps and cfg.threshold == threshold
-                ],
-                key=lambda cfg: cfg.draft_init,
-            )
-            box_data: list[list[float]] = []
-            labels: list[str] = []
-            medians: list[float] = []
-
-            for cfg in configs:
-                ratios = [
-                    100.0 * record["wall_clock_s"] / base_by_idx[record["img_idx"]]
-                    for record in two_picard[cfg]
-                    if record["img_idx"] in base_by_idx and base_by_idx[record["img_idx"]] > 0
-                ]
-                if not ratios:
-                    continue
-                box_data.append(ratios)
-                labels.append(str(cfg.draft_init))
-                medians.append(float(np.median(ratios)))
-
-            if not box_data:
-                plt.close(fig)
-                continue
-
-            boxplot = ax.boxplot(
-                box_data,
-                patch_artist=True,
-                medianprops={"color": "black", "linewidth": 1.4},
-            )
-            for patch in boxplot["boxes"]:
-                patch.set_facecolor("#4C78A8")
-                patch.set_alpha(0.65)
-
-            ax.plot(range(1, len(medians) + 1), medians, color="#1F3552", linewidth=1.2, marker="o", markersize=3)
-            ax.axhline(100, color="#E45756", linestyle="--", linewidth=1.0)
-            ax.set_xticks(range(1, len(labels) + 1))
-            ax.set_xticklabels(labels, fontsize=8)
-            ax.set_title(f"{draft} -> {base}", fontsize=10)
-            ax.set_xlabel("Draft init iters", fontsize=9)
-            ax.set_ylabel(f"steps={num_steps}\n% of baseline wall-clock", fontsize=9)
-
-            save_figure(fig, f"02_twopic_wallclock_{draft}_{base}_steps_{num_steps}_threshold_{threshold}.png")
+        save_figure(fig, f"02_twopic_iterations_threshold_{threshold}.png")
 
 
 def acceptance_series(record: dict[str, Any]) -> list[float]:
@@ -594,16 +506,15 @@ def plot_weighted_iters_vs_mssim(points: list[MSSIMPoint]) -> None:
 
 
 def main() -> None:
-    baseline = parse_baseline_results(load_results("baseline"))
     mssim_points = parse_mssim_results(load_results("mssim"))
     speculative = parse_speculative_results(load_results("speculative"))
-    two_picard = parse_two_picard_results(load_results("two_picard_time"))
+    two_picard = parse_two_picard_results(load_results("two_picard_iterations"))
     grid_points = parse_grid_results(load_results("two_picard_grid"))
 
-    if baseline and two_picard:
-        plot_two_picard_wallclock(baseline, two_picard)
+    if two_picard:
+        plot_two_picard_iterations(two_picard)
     else:
-        print("Skipping two-picard wall-clock plot: missing baseline or two_picard_time results.")
+        print("Skipping two-picard iterations plot: missing two_picard_iterations results.")
 
     if speculative:
         plot_speculative_acceptance(speculative)
